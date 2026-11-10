@@ -1,0 +1,22 @@
+{
+  "name": "omp-usage-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Node-only omp usage collector and native macOS usage dashboard",
+  "workspaces": ["packages/*", "apps/*"],
+  "engines": { "node": ">=22.18.0" },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test packages/usage-core/*.test.mjs apps/macos/*.test.mjs",
+    "verify": "npm run check && npm test",
+    "usage:collect": "node packages/usage-core/cli.mjs",
+    "macos:build": "node apps/macos/build.mjs",
+    "macos:install": "node apps/macos/install.mjs",
+    "macos:uninstall": "node apps/macos/uninstall.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  }
+}
