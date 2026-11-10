@@ -48,7 +48,7 @@ const optionalNumber = x => x === undefined || finite(x);
 /** @param {unknown} x */
 const optionalString = x => x === undefined || typeof x === 'string';
 /** @param {unknown} value @returns {value is UsageSnapshot} */
-export function validUsageSnapshot(value) {
+function validUsageSnapshot(value) {
   if (!object(value) || value.version !== 1 || !finite(value.capturedAt) || !Array.isArray(value.accounts) || !Array.isArray(value.unavailable)) return false;
   return value.unavailable.every(u => object(u) && typeof u.provider === 'string' && typeof u.label === 'string' && typeof u.reason === 'string') && value.accounts.every(a => {
     if (!object(a) || typeof a.id !== 'string' || typeof a.provider !== 'string' || typeof a.label !== 'string' || !finite(a.fetchedAt) || !optionalString(a.plan) || !stringArray(a.notes) || !Array.isArray(a.limits)) return false;
