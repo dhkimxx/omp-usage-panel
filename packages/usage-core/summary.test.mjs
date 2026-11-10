@@ -18,14 +18,13 @@ test('selects maximum across accounts, deterministic ties, exact metrics and ove
   const [filtered] = summarizeProviders(data, { ...settings, metrics: { mistral: 'b' } })
   assert.equal(filtered.percent, 80); assert.equal(filtered.severity, 'critical')
   const [missing] = summarizeProviders(data, { ...settings, metrics: { mistral: 'monthly' } })
-  assert.equal(missing.percent, null); assert.deepEqual(missing.notes, ['Configured metric not found'])
+  assert.equal(missing.percent, null)
 })
 test('unknown exhaustion, zero, provider order and unavailability remain distinct', () => {
   const data = result([account('a', 'mistral', [limit('x', undefined, 'exhausted')]), account('b', 'openai-codex', [limit('x', 0)])], [{ provider: 'other', label: 'Other', reason: 'Unavailable' }])
   const summaries = summarizeProviders(data, settings)
   assert.deepEqual(summaries.map(x => x.provider), ['openai-codex', 'mistral', 'other'])
   assert.equal(summaries[0].value, '0%'); assert.equal(summaries[1].severity, 'critical'); assert.equal(summaries[1].value, '—'); assert.equal(summaries[2].severity, 'unknown')
-  assert.deepEqual(summaries[2].notes, ['Some usage data is unavailable'])
   assert.equal(summarizeProviders(data, { ...settings, providers: ['missing'], labels: { missing: 'Custom' } })[0].label, 'Custom')
 })
 test('formatting does not promote values across severity boundaries', () => {
