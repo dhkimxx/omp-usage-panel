@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -26,5 +26,4 @@ jobs:
       - run: npm ci
       - run: npm run verify
       - name: Build the complete macOS app
-        if: runner.os == 'macOS'
         run: npm run macos:build

@@ -19,14 +19,14 @@ test('live data survives a forced refresh failure and no-data failure remains un
     await writeFile(configPath, JSON.stringify(config))
     const payload = { reports: [{ provider: 'mistral', fetchedAt: 1, metadata: { accountName: 'Test' }, limits: [{ id: 'monthly', label: 'Month', amount: { unit: 'percent', used: 123 } }] }] }
     await writeFile(bin, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(JSON.stringify(payload))})\n`, { mode: 0o700 })
-    const env = { ...process.env, XDG_CACHE_HOME: path.join(dir, 'cache'), HOME: dir }
+    const env = { ...process.env, HOME: dir }
     const invoke = async (/** @type {string[]} */ args, /** @type {NodeJS.ProcessEnv} */ environment = env) => JSON.parse((await run(process.execPath, [bridge, '--config', configPath, ...args], { env: environment })).stdout)
     const live = await invoke([])
     assert.equal(live.source, 'live'); assert.equal(live.summaries[0].percent, 123); assert.equal(live.summaries[0].severity, 'critical')
     await writeFile(bin, `#!${process.execPath}\nprocess.stderr.write('private error'); process.exit(1)\n`, { mode: 0o700 })
     const stale = await invoke(['--refresh'])
     assert.equal(stale.source, 'stale'); assert.equal(stale.summaries[0].value, '123%'); assert.equal(stale.error, 'Usage refresh failed')
-    const empty = await invoke(['--refresh'], { ...env, HOME: path.join(dir, 'other-home'), XDG_CACHE_HOME: path.join(dir, 'other-cache') })
+    const empty = await invoke(['--refresh'], { ...env, HOME: path.join(dir, 'other-home') })
     assert.equal(empty.source, 'unavailable'); assert.equal(empty.snapshot, null); assert.deepEqual(empty.summaries, [])
   } finally { await rm(dir, { recursive: true, force: true }) }
 })

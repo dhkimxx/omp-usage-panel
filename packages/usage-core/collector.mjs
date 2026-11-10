@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { access, chmod, lstat, mkdir, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { homedir, platform } from 'node:os';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { normalizeUsage } from './normalize.mjs';
@@ -21,7 +21,7 @@ async function executable(candidate) {
   try { await access(candidate, constants.X_OK); return true; } catch { return false; }
 }
 /** @param {string} p */
-function sourceBin(p) { return p.split(/[\\/]+/).includes('node_modules'); }
+function sourceBin(p) { return p.split('/').includes('node_modules'); }
 /** @param {string | undefined} override */
 async function resolveBin(override) {
   if (override) return path.resolve(override);
@@ -64,7 +64,7 @@ export async function collectUsage(options = {}) {
   const bin = await resolveBin(options.ompBin), profile = (options.profile ?? process.env.OMP_PROFILE ?? process.env.PI_PROFILE)?.trim() || 'default';
   const roots = [process.env.HOME, process.env.PI_CONFIG_DIR, process.env.PI_CODING_AGENT_DIR, process.env.XDG_DATA_HOME, process.env.XDG_STATE_HOME, process.env.XDG_CONFIG_HOME];
   const identity = createHash('sha256').update(JSON.stringify([bin, profile, roots])).digest('hex');
-  const cacheDir = options.cacheDir ?? (platform() === 'darwin' ? path.join(homedir(), 'Library', 'Caches', 'omp-usage') : path.join(process.env.XDG_CACHE_HOME || path.join(homedir(), '.cache'), 'omp-usage'));
+  const cacheDir = options.cacheDir ?? path.join(homedir(), 'Library', 'Caches', 'omp-usage');
   const cacheFile = path.join(cacheDir, `${identity}.json`);
   /** @type {UsageSnapshot | null} */ let previous = null;
   try {

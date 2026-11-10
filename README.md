@@ -16,10 +16,8 @@ Provider API/authentication patches live separately in [my-omp-patch](https://gi
 | Platform | Status |
 | --- | --- |
 | macOS 13+ | Implemented: native notch-aware / floating dashboard, source installer and login startup |
-| Ubuntu | **TODO:** desktop frontend and installation/startup integration |
-| Windows | **TODO:** native frontend and installation/startup integration |
 
-The common collector and JSON schema are independent of AppKit. There are no placeholder Ubuntu or Windows apps.
+The common collector and JSON schema are independent of AppKit.
 
 ## Install on macOS
 
@@ -105,7 +103,7 @@ Collection uses Node built-ins and the local omp credential store. Cache identit
 
 Manual Refresh also runs the supported `omp usage invalidate` command before the JSON query so omp's own usage cache cannot mask the refresh. It does not change credentials or provider-plugin installation.
 
-Linux cache: `$XDG_CACHE_HOME/omp-usage/` or `~/.cache/omp-usage/`. Override the cache root with `OMP_USAGE_CACHE_DIR`.
+Override the cache root with `OMP_USAGE_CACHE_DIR`.
 
 ## Uninstall
 
@@ -131,12 +129,7 @@ npm run verify
 npm run macos:build
 ```
 
-`verify` runs checked JavaScript/TypeScript and Node behavioral tests. On macOS it also compiles/runs Swift model, layout, identity-matching and transition checks. CI verifies on macOS and Ubuntu and compiles the complete AppKit app on macOS. No live credentials or provider requests are needed by the tests.
-
-## OS roadmap
-
-- [ ] **Ubuntu:** select a GNOME/Wayland/X11-compatible desktop surface; implement provider summaries/all-account details, safe multi-monitor placement and user-session startup/install/removal using the existing collector/schema.
-- [ ] **Windows:** implement a native dashboard/tray surface with DPI/multi-monitor handling, all-account details and user-session startup/install/removal using the same collector/schema.
+`verify` runs checked JavaScript/TypeScript and Node behavioral tests. On macOS it also compiles/runs Swift model, layout, identity-matching and transition checks. CI verifies on macOS and compiles the complete AppKit app. No live credentials or provider requests are needed by the tests.
 
 ## License
 

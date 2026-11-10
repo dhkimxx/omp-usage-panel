@@ -22,7 +22,7 @@ test('packaged collector runs outside the checkout without providers or host pac
     writeFileSync(omp, `#!${process.execPath}\nif (JSON.stringify(process.argv.slice(2)) !== '["usage","--json"]') process.exit(9)\nprocess.stdout.write(${JSON.stringify(JSON.stringify(payload))})\n`, { mode: 0o700 })
     writeFileSync(config, JSON.stringify(defaultConfig({ nodePath: process.execPath, ompPath: omp })))
     const { stdout } = await run(process.execPath, [path.join(runtime, 'apps/macos/collect.mjs'), '--config', config], {
-      cwd: directory, env: { ...process.env, HOME: directory, XDG_CACHE_HOME: path.join(directory, 'cache'), NODE_PATH: '' },
+      cwd: directory, env: { ...process.env, HOME: directory, NODE_PATH: '' },
     })
     const result = JSON.parse(stdout)
     assert.equal(result.source, 'live'); assert.equal(result.snapshot.accounts[0].provider, 'mistral'); assert.equal(result.summaries[0].percent, 42)
