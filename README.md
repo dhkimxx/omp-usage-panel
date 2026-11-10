@@ -11,17 +11,11 @@ flowchart LR
 
 Provider API/authentication patches live outside this repository. They are optional: this dashboard reads whichever providers and accounts your installed omp supports. Installing or removing the dashboard does not install, retarget, or remove provider plugins.
 
-## Platforms
-
-| Platform | Status |
-| --- | --- |
-| macOS 13+ | Implemented: native notch-aware / floating dashboard, source installer and login startup |
-
 The common collector and JSON schema are independent of AppKit.
 
 ## Install on macOS
 
-Requires Node.js **22.18+**, an installed and authenticated omp supporting `omp usage --json`, and Xcode Command Line Tools (`swiftc`, `codesign`) to build. The installed app needs Node and omp, not development dependencies or Bun. Locally exercised with omp **18.18.6**.
+Requires macOS 13+, Node.js **22.18+**, an installed and authenticated omp supporting `omp usage --json`, and Xcode Command Line Tools (`swiftc`, `codesign`) to build. The installed app needs Node and omp, not development dependencies or Bun. Locally exercised with omp **18.18.6**.
 
 ```sh
 git clone https://github.com/dhkimxx/omp-usage-dashboard.git
@@ -48,7 +42,7 @@ This release is **source-install distribution**, not a self-contained/notarized 
 
 The existing app identifier, LaunchAgent, configuration/cache paths and saved window position are retained, so there is no second app or startup job. The installer verifies ownership before replacement and restores the previous app/job if activation fails. Modified or foreign installations are refused rather than overwritten.
 
-Old installation records are retained as `install-v1.json` when migrating to the dashboard-only ownership record. Historical provider releases are left untouched. Use the provider repository's `plugins:install` separately to adopt those links into its own managed runtime.
+Old installation records are retained as `install-v1.json` when migrating to the dashboard-only ownership record. Historical provider releases are left untouched.
 
 ## Display and controls
 
