@@ -32,7 +32,7 @@ function fixture() {
     // No omp plugin command is permitted by this UI-only fixture.
     throw new Error(`Unexpected command: ${file} ${args.join(' ')}`)
   }
-  const options = { home, platform: 'darwin', node: process.execPath, env: { OMP_BIN: '/bin/sh' }, swiftbarPluginDir: path.join(home, 'swiftbar'), run, uid: 123, sleep() { waits++ },
+  const options = { home, platform: 'darwin', node: process.execPath, env: { OMP_BIN: '/bin/sh' }, run, uid: 123, sleep() { waits++ },
     /** @param {{outputDirectory:string}} options */
     build({ outputDirectory }) { builds++; const built = path.join(outputDirectory, 'fake.app'); mkdirSync(path.join(built, 'Contents/MacOS'), { recursive: true }); writeFileSync(path.join(built, 'Contents/MacOS/OMPUsagePanel'), `binary-${builds}`, { mode: 0o755 }); return built } }
   return { home, stateDir, stateFile, options, config, app, agent, commands, failNextStart() { failStart = true }, setForeignJob() { foreignJob = true; running = true }, stopCount() { return stops }, delayRemoval(polls = 3) { delayRemoval = polls }, failDrainAfterBootout(persistent = false) { failDrainOnBootout = persistent ? Infinity : 1 }, waitCount() { return waits }, isRunning() { return running }, cleanup() { rmSync(home, { recursive: true, force: true }) } }
@@ -66,26 +66,22 @@ test('installation without personal providers writes only a v2 UI manifest', () 
     assert.equal(f.isRunning(), true)
   } finally { f.cleanup() }
 })
-test('installation migrates SwiftBar UI settings and retains configuration through uninstall and reinstall', () => {
+test('configuration is retained through uninstall and reinstall', () => {
   const f = fixture()
   try {
-    mkdirSync(f.options.swiftbarPluginDir, { recursive: true }); writeFileSync(path.join(f.options.swiftbarPluginDir, 'omp-usage.1m.vars.json'), JSON.stringify({ OMP_USAGE_METRICS: '{"mistral":"monthly"}', OMP_USAGE_SHOW_PACE: 'false' }))
     install(f.options)
-    const config = JSON.parse(readFileSync(f.config, 'utf8')); assert.equal(config.metrics.mistral, 'monthly'); assert.equal(config.showPace, false)
     const original = readFileSync(f.config, 'utf8')
     uninstall(f.options); assert.equal(existsSync(f.app), false); assert.equal(existsSync(f.agent), false); assert.equal(readFileSync(f.config, 'utf8'), original)
     install(f.options); assert.equal(existsSync(f.app), true); assert.equal(readFileSync(f.config, 'utf8'), original)
   } finally { f.cleanup() }
 })
-test('existing configuration does not require SwiftBar preferences or environment migration', () => {
+test('existing configuration is preserved when reinstalled with different environment defaults', () => {
   const f = fixture()
   try {
     install(f.options)
     const config = readFileSync(f.config, 'utf8')
-    const { swiftbarPluginDir: _swiftbarPluginDir, ...options } = f.options
-    install({ ...options, env: {} })
+    install({ ...f.options, env: {} })
     assert.equal(readFileSync(f.config, 'utf8'), config)
-    assert.equal(f.commands.some(command => command.file === '/usr/bin/defaults'), false)
   } finally { f.cleanup() }
 })
 test('install, failed update and uninstall leave provider links, settings and legacy releases untouched', () => {

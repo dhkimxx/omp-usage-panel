@@ -1,6 +1,6 @@
 # omp-usage-dashboard
 
-Standalone usage dashboard for [omp](https://github.com/can1357/oh-my-pi). Native macOS AppKit app and a shared Node.js collector; no SwiftBar, Orca, or interactive omp session required.
+Standalone usage dashboard for [omp](https://github.com/can1357/oh-my-pi). Native macOS AppKit app and a shared Node.js collector; no interactive omp session required.
 
 ```mermaid
 flowchart LR
@@ -9,7 +9,7 @@ flowchart LR
     C --> D[macOS AppKit dashboard]
 ```
 
-Provider API/authentication patches live separately in [my-omp-patch](https://github.com/dhkimxx/my-omp-patch). They are optional: this dashboard reads whichever providers and accounts your installed omp supports. Installing or removing the dashboard does not install, retarget, or remove provider plugins.
+Provider API/authentication patches live outside this repository. They are optional: this dashboard reads whichever providers and accounts your installed omp supports. Installing or removing the dashboard does not install, retarget, or remove provider plugins.
 
 ## Platforms
 
@@ -44,13 +44,11 @@ If omp is not discoverable, set `OMP_BIN=/absolute/path/to/omp` for the initial 
 
 This release is **source-install distribution**, not a self-contained/notarized binary. It builds for the current Mac architecture and uses ad-hoc signing. To build without installing: `npm run macos:build` → `build/OMP Usage.app`.
 
-### Migration from my-omp-patch
+### Migration from the previous installer
 
 The existing app identifier, LaunchAgent, configuration/cache paths and saved window position are retained, so there is no second app or startup job. The installer verifies ownership before replacement and restores the previous app/job if activation fails. Modified or foreign installations are refused rather than overwritten.
 
 Old installation records are retained as `install-v1.json` when migrating to the dashboard-only ownership record. Historical provider releases are left untouched. Use the provider repository's `plugins:install` separately to adopt those links into its own managed runtime.
-
-Existing `config.json` wins. On a first installation only, compatible historical SwiftBar usage settings are imported; the SwiftBar application itself is not removed.
 
 ## Display and controls
 
@@ -133,4 +131,4 @@ npm run macos:build
 
 ## License
 
-[MIT](LICENSE), copyright © 2026 dhkimxx. Extracted from the dashboard/collector previously maintained in `my-omp-patch`.
+[MIT](LICENSE).

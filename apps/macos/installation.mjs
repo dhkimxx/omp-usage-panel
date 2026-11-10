@@ -3,10 +3,10 @@ import { execFileSync } from 'node:child_process'
 import { accessSync, constants, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
-import { defaultConfig, migrateSwiftbarVariables, parseConfig } from './config.mjs'
+import { defaultConfig, parseConfig } from './config.mjs'
 import { buildApp, sourceRoot } from './build.mjs'
 
-/** @typedef {{home?:string, stateDir?:string, appPath?:string, agentPath?:string, configPath?:string, sourceRoot?:string, swiftbarPluginDir?:string, node?:string, run?:(file:string,args:string[])=>string, sleep?:(milliseconds:number)=>void, env?:NodeJS.ProcessEnv, dryRun?:boolean, platform?:string, uid?:number, build?:(options:{outputDirectory:string})=>string}} InstallOptions */
+/** @typedef {{home?:string, stateDir?:string, appPath?:string, agentPath?:string, configPath?:string, sourceRoot?:string, node?:string, run?:(file:string,args:string[])=>string, sleep?:(milliseconds:number)=>void, env?:NodeJS.ProcessEnv, dryRun?:boolean, platform?:string, uid?:number, build?:(options:{outputDirectory:string})=>string}} InstallOptions */
 /** @typedef {{version:1|2, appPath:string, agentPath:string, appHash:string, agentHash:string}} InstallState */
 /** @typedef {ReturnType<typeof context>} Context */
 
@@ -98,24 +98,6 @@ function resolveOmp(env, home) {
   if (!found) throw new Error('Cannot find executable omp; set OMP_BIN')
   return found
 }
-/** @param {Context} c @param {string} pluginDir */
-function variables(c, pluginDir) {
-  /** @type {Record<string,string>} */
-  const result = {}
-  const wanted = new Set(['OMP_BIN', 'OMP_PROFILE', 'OMP_USAGE_PROVIDERS', 'OMP_USAGE_LABELS', 'OMP_USAGE_METRICS', 'OMP_USAGE_REFRESH_MINUTES', 'OMP_USAGE_WARN_PERCENT', 'OMP_USAGE_CRITICAL_PERCENT', 'OMP_USAGE_SHOW_PACE'])
-  /** @param {unknown} value */
-  function extract(value) {
-    if (!value || typeof value !== 'object') return
-    for (const [key, entry] of Object.entries(value)) {
-      if (wanted.has(key)) { if (typeof entry !== 'string' && typeof entry !== 'number' && typeof entry !== 'boolean') throw new Error(`Invalid SwiftBar variable ${key}`); result[key] = String(entry) }
-      else if (entry && typeof entry === 'object') extract(entry)
-    }
-  }
-  const pref = path.join(c.home, 'Library/Preferences/com.ameba.SwiftBar.plist')
-  if (present(pref)) { let value; try { value = JSON.parse(c.run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', pref])) } catch { throw new Error('Cannot read SwiftBar preferences for migration') }; extract(value) }
-  for (const name of ['orca-usage.1m.vars.json', 'omp-usage.1m.vars.json']) { const file = path.join(pluginDir, name); if (present(file)) { let value; try { value = JSON.parse(readFileSync(file, 'utf8')) } catch { throw new Error(`Cannot read SwiftBar variables: ${file}`) }; extract(value) } }
-  return result
-}
 /** @param {Context} c */
 function isRunning(c) { try { c.run('/bin/launchctl', ['print', `gui/${c.uid}/${label}`]); return true } catch { return false } }
 /** Verify the loaded launchd job before ever stopping it. @param {Context} c @param {InstallState|null} state */
@@ -174,18 +156,7 @@ export function install(options = {}) {
     const node = path.resolve(options.node || process.execPath)
     let config
     if (present(c.config)) config = parseConfig(JSON.parse(readFileSync(c.config, 'utf8')))
-    else {
-      const pluginDir = path.resolve(options.swiftbarPluginDir || (() => {
-        try { return c.run('/usr/bin/defaults', ['read', 'com.ameba.SwiftBar', 'PluginDirectory']).trim() || path.join(c.home, '.config/swiftbar/plugins') }
-        catch (error) {
-          if (!String(error).includes('does not exist')) throw new Error('Cannot read SwiftBar plugin directory')
-          return path.join(c.home, '.config/swiftbar/plugins')
-        }
-      })())
-      const vars = variables(c, pluginDir)
-      const omp = resolveOmp({ ...c.env, ...(vars.OMP_BIN ? { OMP_BIN: vars.OMP_BIN } : {}) }, c.home)
-      config = migrateSwiftbarVariables(vars, defaultConfig({ nodePath: node, ompPath: omp, profile: c.env.OMP_PROFILE || 'default' }))
-    }
+    else config = defaultConfig({ nodePath: node, ompPath: resolveOmp(c.env, c.home), profile: c.env.OMP_PROFILE || 'default' })
     validatePaths(c, config.nodePath, config.ompPath)
     const content = plist(c.app, c.config)
     const actions = [`App: ${c.app}`, `Config: ${c.config}`, `LaunchAgent: ${c.agent}`, `Node: ${config.nodePath}`, `omp: ${config.ompPath}`]
