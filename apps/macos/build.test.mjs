@@ -11,7 +11,7 @@ import { defaultConfig } from './config.mjs'
 const run = promisify(execFile)
 
 test('packaged collector runs outside the checkout without providers or host packages', async () => {
-  const directory = mkdtempSync(path.join(tmpdir(), 'omp-dashboard-runtime-'))
+  const directory = mkdtempSync(path.join(tmpdir(), 'omp-panel-runtime-'))
   try {
     const runtime = path.join(directory, 'runtime'), omp = path.join(directory, 'omp'), config = path.join(directory, 'config.json')
     for (const file of runtimeFiles) {

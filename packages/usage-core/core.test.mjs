@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { collectUsage, normalizeUsage, collectorOptionsFromEnv } from './index.mjs';
+import { collectUsage, collectorOptionsFromEnv } from './index.mjs';
+import { normalizeUsage } from './normalize.mjs';
 
 const report = { provider: 'commandcode', fetchedAt: 123, metadata: { accountId: 'one', email: 'one@example.test', planType: 'pro', monthly: { used: 15, limit: 10, remaining: -5, usedFraction: 1.5 } }, limits: [
   { id: 'commandcode:monthly', label: 'Monthly', scope: { sharedGroup: 'monthly' }, amount: { unit: 'credits', remaining: -5 } },
