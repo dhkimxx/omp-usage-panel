@@ -1,96 +1,17 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
-import { accessSync, constants, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
+import { cpSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { defaultConfig, parseConfig } from './config.mjs'
 import { buildApp, sourceRoot } from './build.mjs'
+import { appTreeHash, atomic, bootoutJob, canonical, checkOwned, context, digest, executable, jobRunning, loadManifest, ownedJobRunning, plist, preserveLegacyState, present, startJob, stopJob, syncTree, waitForStop, withLock, within } from './ownership.mjs'
+import { discardPendingUpdate, reconcileUpdate, removeUpdaterArea } from './update-transaction.mjs'
 
-/** @typedef {{home?:string, stateDir?:string, appPath?:string, agentPath?:string, configPath?:string, sourceRoot?:string, node?:string, run?:(file:string,args:string[])=>string, sleep?:(milliseconds:number)=>void, env?:NodeJS.ProcessEnv, dryRun?:boolean, platform?:string, uid?:number, build?:(options:{outputDirectory:string})=>string}} InstallOptions */
-/** @typedef {{version:1|2, appPath:string, agentPath:string, appHash:string, agentHash:string}} InstallState */
-/** @typedef {ReturnType<typeof context>} Context */
+/** @typedef {import('./ownership.mjs').OwnershipOptions & {sourceRoot?:string, node?:string, build?:(options:{outputDirectory:string})=>string}} InstallOptions */
+/** @typedef {ReturnType<typeof installContext>} InstallContext */
 
-const label = 'com.dhkim.omp-usage-panel'
-/** @param {string} file @param {string[]} args */
-const runCommand = (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-/** @param {number} milliseconds */
-function sleep(milliseconds) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds) }
-/** @param {string} file */
-function present(file) { try { lstatSync(file); return true } catch (e) { if (/** @type {NodeJS.ErrnoException} */ (e).code === 'ENOENT') return false; throw e } }
-/** @param {string} file */
-function executable(file) { try { accessSync(file, constants.X_OK); return true } catch { return false } }
-/** @param {string} file */
-function canonical(file) { let p = path.resolve(file), parts = []; while (!existsSync(p)) { parts.unshift(path.basename(p)); const next = path.dirname(p); if (next === p) break; p = next } return path.join(realpathSync(p), ...parts) }
-/** @param {string} file @param {string} root */
-function within(file, root) { return file === root || file.startsWith(root + path.sep) }
-/** @param {string|Buffer} data */
-function digest(data) { return createHash('sha256').update(data).digest('hex') }
-/** @param {string} root */
-function treeHash(root) {
-  const hash = createHash('sha256')
-  /** @param {string} file @param {string} rel */
-  function visit(file, rel) {
-    const stat = lstatSync(file)
-    if (stat.isSymbolicLink()) throw new Error(`Unexpected symlink in app: ${file}`)
-    if (stat.isDirectory()) { hash.update(`d\0${rel}\0`); for (const name of readdirSync(file).sort()) visit(path.join(file, name), path.join(rel, name)); return }
-    if (!stat.isFile()) throw new Error(`Unexpected app entry: ${file}`)
-    const data = readFileSync(file); hash.update(`f\0${rel}\0${stat.mode & 0o777}\0${data.length}\0`).update(data)
-  }
-  visit(root, ''); return hash.digest('hex')
-}
-/** @param {string} file @param {string} content @param {number} [mode] */
-function atomic(file, content, mode = 0o600) {
-  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
-  const temp = path.join(path.dirname(file), `.omp-${randomUUID()}`)
-  try { writeFileSync(temp, content, { mode, flag: 'wx' }); renameSync(temp, file) } finally { rmSync(temp, { force: true }) }
-}
-/** @param {string} file @returns {InstallState|null} */
-function load(file) {
-  if (!present(file)) return null
-  const value = JSON.parse(readFileSync(file, 'utf8'))
-  if (!value || ![1, 2].includes(value.version) || typeof value.appPath !== 'string' || typeof value.agentPath !== 'string' ||
-      !/^[a-f0-9]{64}$/.test(value.appHash) || !/^[a-f0-9]{64}$/.test(value.agentHash) ||
-      (value.version === 1 && !Array.isArray(value.snapshots))) throw new Error('Invalid installation manifest; refusing changes')
-  return value
-}
-/** Retain the original provider migration record byte-for-byte, without replacing an existing backup.
- * @param {string} file @param {InstallState|null} state */
-function preserveLegacyState(file, state) {
-  if (state?.version !== 1) return
-  const backup = path.join(path.dirname(file), 'install-v1.json'), content = readFileSync(file)
-  const temp = path.join(path.dirname(file), `.omp-${randomUUID()}`)
-  try {
-    writeFileSync(temp, content, { mode: 0o600, flag: 'wx' })
-    try { linkSync(temp, backup) }
-    catch (error) {
-      if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'EEXIST') throw error
-      if (!lstatSync(backup).isFile() || !readFileSync(backup).equals(content)) throw new Error(`Unrelated legacy migration backup at ${backup}; refusing replacement`)
-    }
-  } finally { rmSync(temp, { force: true }) }
-}
-/** @param {string} s */
-function xml(s) { return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;') }
-/** @param {string} app @param {string} config */
-function plist(app, config) { return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${label}</string><key>ProgramArguments</key><array><string>${xml(path.join(app, 'Contents/MacOS/OMPUsagePanel'))}</string><string>--config</string><string>${xml(config)}</string></array><key>RunAtLoad</key><true/></dict></plist>\n` }
 /** @param {InstallOptions} options */
-function context(options) {
-  const home = path.resolve(options.home || homedir()), stateDir = path.resolve(options.stateDir || path.join(home, 'Library/Application Support/omp-usage-panel'))
-  return { home, stateDir, app: path.resolve(options.appPath || path.join(home, 'Applications/OMP Usage.app')), agent: path.resolve(options.agentPath || path.join(home, `Library/LaunchAgents/${label}.plist`)), config: path.resolve(options.configPath || path.join(stateDir, 'config.json')), source: path.resolve(options.sourceRoot || sourceRoot), run: options.run || runCommand, sleep: options.sleep || sleep, env: options.env || process.env, dry: !!options.dryRun, platform: options.platform || process.platform, uid: options.uid ?? process.getuid?.() ?? -1 }
-}
-/** @param {Context} c @param {()=>string[]} action */
-function lock(c, action) {
-  if (c.dry) return action()
-  mkdirSync(c.stateDir, { recursive: true, mode: 0o700 })
-  const lock = path.join(c.stateDir, 'lock')
-  try { mkdirSync(lock, { mode: 0o700 }) } catch (e) { if (/** @type {NodeJS.ErrnoException} */ (e).code === 'EEXIST') throw new Error(`Installer lock exists: ${lock}`); throw e }
-  try { return action() } finally { rmSync(lock, { recursive: true }) }
-}
-/** @param {Context} c @param {InstallState|null} state */
-function checkOwned(c, state) {
-  if (state && (state.appPath !== c.app || state.agentPath !== c.agent)) throw new Error('Tracked installation uses different app or LaunchAgent paths')
-  if (present(c.app) && (!state || treeHash(c.app) !== state.appHash)) throw new Error(`Foreign or modified app at ${c.app}; refusing replacement`)
-  if (present(c.agent) && (!state || !lstatSync(c.agent).isFile() || digest(readFileSync(c.agent)) !== state.agentHash)) throw new Error(`Foreign or modified LaunchAgent at ${c.agent}; refusing replacement`)
-}
+function installContext(options) { return { ...context(options), source: path.resolve(options.sourceRoot || sourceRoot) } }
 /** @param {NodeJS.ProcessEnv} env @param {string} home */
 function resolveOmp(env, home) {
   const choices = env.OMP_BIN ? [path.resolve(env.OMP_BIN)] : [path.join(home, '.local/bin/omp'), ...(env.PATH || '').split(path.delimiter).filter(Boolean).map(p => path.resolve(p, 'omp'))]
@@ -98,44 +19,7 @@ function resolveOmp(env, home) {
   if (!found) throw new Error('Cannot find executable omp; set OMP_BIN')
   return found
 }
-/** @param {Context} c */
-function isRunning(c) { try { c.run('/bin/launchctl', ['print', `gui/${c.uid}/${label}`]); return true } catch { return false } }
-/** Verify the loaded launchd job before ever stopping it. @param {Context} c @param {InstallState|null} state */
-function ownedJobRunning(c, state) {
-  let description
-  try { description = c.run('/bin/launchctl', ['print', `gui/${c.uid}/${label}`]) } catch { return false }
-  const jobPath = /^\s*path = (.+)$/m.exec(description)?.[1]
-  const program = /^\s*program = (.+)$/m.exec(description)?.[1]
-  const argumentsBlock = /^\s*arguments = \{\s*\n([\s\S]*?)^\s*\}/m.exec(description)?.[1]
-  const args = argumentsBlock?.split('\n').map(line => line.trim()).filter(Boolean)
-  const expectedProgram = path.join(c.app, 'Contents/MacOS/OMPUsagePanel')
-  if (!state || !present(c.agent) || !present(c.app) || jobPath !== c.agent || program !== expectedProgram ||
-      !args || args.length !== 3 || args[0] !== expectedProgram || args[1] !== '--config' || args[2] !== c.config) {
-    throw new Error(`Foreign or unverified loaded LaunchAgent ${label}; refusing to stop it`)
-  }
-  checkOwned(c, state)
-  return true
-}
-/** @param {Context} c */
-function start(c) { c.run('/bin/launchctl', ['bootstrap', `gui/${c.uid}`, c.agent]) }
-/** @param {Context} c */
-function bootout(c) { c.run('/bin/launchctl', ['bootout', `gui/${c.uid}/${label}`]) }
-/** @param {Context} c */
-function waitForStop(c) {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try { c.run('/bin/launchctl', ['print', `gui/${c.uid}/${label}`]) }
-    catch (error) {
-      const failure = /** @type {{status?:number, stderr?:string|Buffer}} */ (error)
-      if (failure?.status === 113 && String(failure.stderr || '').includes('Could not find service')) return
-      throw error
-    }
-    c.sleep(100)
-  }
-  throw new Error(`Timed out waiting for LaunchAgent ${label} to leave launchd after bootout`)
-}
-/** @param {Context} c */
-function stop(c) { bootout(c); waitForStop(c) }
-/** @param {Context} c @param {string} node @param {string} omp */
+/** @param {InstallContext} c @param {string} node @param {string} omp */
 function validatePaths(c, node, omp) {
   for (const [name, file] of [['Node', node], ['omp', omp]]) {
     if (!path.isAbsolute(file) || !executable(file)) throw new Error(`${name} is not an absolute executable: ${file}`)
@@ -147,10 +31,12 @@ function validatePaths(c, node, omp) {
 }
 /** @param {InstallOptions} [options] */
 export function install(options = {}) {
-  const c = context(options)
+  const c = installContext(options)
   if (c.platform !== 'darwin') throw new Error('Installation requires macOS')
-  return lock(c, () => {
-    const stateFile = path.join(c.stateDir, 'install.json'), state = load(stateFile)
+  return withLock(c, () => {
+    const stateFile = path.join(c.stateDir, 'install.json'), stored = loadManifest(stateFile)
+    // A pending Sparkle update is a legitimate owner of the app on disk, never a foreign one.
+    const { state, pending, manifest } = reconcileUpdate(c, stored)
     checkOwned(c, state)
     ownedJobRunning(c, state)
     const node = path.resolve(options.node || process.execPath)
@@ -161,23 +47,25 @@ export function install(options = {}) {
     const content = plist(c.app, c.config)
     const actions = [`App: ${c.app}`, `Config: ${c.config}`, `LaunchAgent: ${c.agent}`, `Node: ${config.nodePath}`, `omp: ${config.ompPath}`]
     if (c.dry) return actions
-    preserveLegacyState(stateFile, state)
+    preserveLegacyState(stateFile, manifest)
     const workspace = path.join(tmpdir(), `omp-panel-${randomUUID()}`), staged = path.join(path.dirname(c.app), `.omp-app-${randomUUID()}`), backup = path.join(path.dirname(c.app), `.omp-backup-${randomUUID()}`), agentBackup = path.join(path.dirname(c.agent), `.omp-agent-${randomUUID()}`)
     let appMoved = false, oldAppMoved = false, agentMoved = false, oldAgentMoved = false, startAttempted = false, stopped = false, configCreated = false
     try {
       mkdirSync(workspace, { recursive: true, mode: 0o700 })
       const built = (options.build || buildApp)({ outputDirectory: workspace })
       mkdirSync(path.dirname(c.app), { recursive: true }); mkdirSync(path.dirname(c.agent), { recursive: true })
-      cpSync(built, staged, { recursive: true, errorOnExist: true, force: false })
-      const appHash = treeHash(staged)
+      // Frameworks inside the app are relative symlinks; they must be copied verbatim, never rewritten to absolute paths.
+      cpSync(built, staged, { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false })
+      syncTree(staged)
+      const appHash = appTreeHash(staged, { uid: c.owner })
       if (!present(c.config)) { atomic(c.config, JSON.stringify(config, null, 2) + '\n'); configCreated = true }
       checkOwned(c, state)
-      if (ownedJobRunning(c, state)) { bootout(c); stopped = true; waitForStop(c) }
+      if (ownedJobRunning(c, state)) { bootoutJob(c); stopped = true; waitForStop(c) }
       if (present(c.app)) { renameSync(c.app, backup); oldAppMoved = true }
       renameSync(staged, c.app); appMoved = true
       if (present(c.agent)) { renameSync(c.agent, agentBackup); oldAgentMoved = true }
       atomic(c.agent, content, 0o644); agentMoved = true
-      startAttempted = true; start(c)
+      startAttempted = true; startJob(c)
       const next = { version: 2, appPath: c.app, agentPath: c.agent, appHash, agentHash: digest(content) }
       atomic(stateFile, JSON.stringify(next, null, 2) + '\n')
     } catch (error) {
@@ -185,15 +73,23 @@ export function install(options = {}) {
       const failures = []
       /** @param {()=>void} fn */
       const attempt = fn => { try { fn() } catch (e) { failures.push(String(e)) } }
-      if (startAttempted && isRunning(c)) attempt(() => stop(c))
+      // The replacement may be running: files are restored only after its shutdown is verified. An inspection or stop failure
+      // preserves both apps (and the previous LaunchAgent) untouched for recovery.
+      if (startAttempted) {
+        try { if (jobRunning(c)) stopJob(c) } catch (e) {
+          throw new Error(`Installation failed: ${String(error)}; rollback incomplete: replacement shutdown could not be verified (${String(e)}); no live path was modified. The previous app is preserved at ${backup} and the previous LaunchAgent at ${agentBackup}`)
+        }
+      }
       if (agentMoved) attempt(() => rmSync(c.agent)); if (oldAgentMoved) attempt(() => renameSync(agentBackup, c.agent))
       if (appMoved) attempt(() => rmSync(c.app, { recursive: true })); if (oldAppMoved) attempt(() => renameSync(backup, c.app))
       if (configCreated) attempt(() => rmSync(c.config))
-      if (stopped && present(c.agent)) attempt(() => { waitForStop(c); start(c) })
+      if (stopped && present(c.agent)) attempt(() => { waitForStop(c); startJob(c) })
       if (failures.length) throw new Error(`Installation failed: ${String(error)}; rollback incomplete: ${failures.join('; ')}`)
       throw error
     } finally { rmSync(staged, { recursive: true, force: true }); rmSync(workspace, { recursive: true, force: true }) }
     if (oldAppMoved) rmSync(backup, { recursive: true }); if (oldAgentMoved) rmSync(agentBackup)
+    // The new ownership record supersedes a pending update's receipt and backup.
+    if (pending) discardPendingUpdate(c)
     return actions
   })
 }
@@ -201,16 +97,19 @@ export function install(options = {}) {
 export function uninstall(options = {}) {
   const c = context(options)
   if (c.platform !== 'darwin') throw new Error('Uninstallation requires macOS')
-  return lock(c, () => {
-    const file = path.join(c.stateDir, 'install.json'), state = load(file)
-    if (!state) return [`No tracked installation at ${file}`]
+  return withLock(c, () => {
+    const file = path.join(c.stateDir, 'install.json'), stored = loadManifest(file)
+    if (!stored) return [`No tracked installation at ${file}`]
+    const { state } = reconcileUpdate(c, stored)
     checkOwned(c, state)
     const running = ownedJobRunning(c, state)
-    const actions = [`Remove owned LaunchAgent ${c.agent}`, `Remove owned app ${c.app}`, `Preserve config and legacy migration records in ${c.stateDir}`]
+    const updater = path.join(c.stateDir, 'updater')
+    const actions = [`Remove owned LaunchAgent ${c.agent}`, `Remove owned app ${c.app}`, `Preserve config and legacy migration records in ${c.stateDir}`, ...(present(updater) ? [`Remove updater helper copies and pending update state in ${updater}`] : [])]
     if (c.dry) return actions
-    if (running) stop(c)
+    if (running) stopJob(c)
     if (present(c.agent)) rmSync(c.agent)
     if (present(c.app)) rmSync(c.app, { recursive: true })
+    removeUpdaterArea(c)
     return actions
   })
 }

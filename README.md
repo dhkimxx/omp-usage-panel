@@ -18,7 +18,7 @@ npm run macos:install
 
 If omp is not discoverable, set `OMP_BIN=/absolute/path/to/omp` for the first install. Reinstalling keeps your existing configuration.
 
-The app is installed to `~/Applications/OMP Usage.app` with its own copy of the collector, so the checkout can be moved or deleted. Node and omp must stay at the paths in `config.json`. Source updates require reinstalling. The build is ad-hoc signed for the current Mac architecture and not notarized.
+The app is installed to `~/Applications/OMP Usage.app` with its own copy of the collector, so the checkout can be moved or deleted. Node and omp must stay at the paths in `config.json`. The source install is a one-time bootstrap; later versions arrive through the in-app updater (see [Updates](#updates)), not by reinstalling from source. The installed app is ad-hoc signed and not notarized.
 
 ## Use
 
@@ -71,6 +71,28 @@ node packages/usage-core/cli.mjs --refresh  # runs `omp usage invalidate` first
 ```
 
 `source` is `live`, `cache`, `stale`, or `unavailable`. Schema: [types.ts](packages/usage-core/types.ts). A failed refresh keeps the last good snapshot, marked `stale`; zero usage is never invented. Cache files can contain account identifiers, so do not commit them. Cache root: `OMP_USAGE_CACHE_DIR`.
+
+## Updates
+
+After the one-time source install above, the app checks GitHub for new versions. Updates are prebuilt universal (arm64 + x86_64) apps downloaded from [GitHub Releases](https://github.com/dhkimxx/omp-usage-panel/releases); no Xcode or source build is needed for them. Node.js 22.18+ and omp are still required. No prebuilt update has been published in the signed feed yet (the feed is currently empty).
+
+- **Defaults:** daily checks on, notifications on, automatic installation **off**.
+- **Settings → Updates** (app-wide, not per omp profile) holds these controls and uses the same **Save & Apply** / **Cancel** as the rest of Settings. **Check for Updates…** in the menu runs a manual check, which ignores Skip and turned-off notifications.
+- **Popup:** a new version shows a native prompt with **Update Now** (this version only), **Skip This Version** (that exact version), **Later** (asks again after 24 hours) and **Turn Off Notifications**. Installing automatically is a separate, optional consent that you can grant in the popup or Settings; notifications, Skip and Later never grant it, and Skip/Later also hold automatic installs.
+- **When it installs:** automatic installation only restarts the app while it is idle: no Settings window, menu, modal, drag or expanded board.
+- **Verification:** the update feed and archive are Ed25519-signed and verified by Sparkle before installation. After Sparkle replaces the app, the watcher checks the installed file tree against the authenticated hash, before the new app starts or the update is committed; a wrong hash rolls back. The updater keeps a copy of its watcher and a backup outside the app bundle, restarts the original LaunchAgent, waits for the new app's startup acknowledgment, and rolls back if it does not report healthy. Your config, auth and provider plugins are preserved. This protects the update path, not against every threat or power loss at any instant.
+- **Gatekeeper:** no Apple Developer ID identity is used. The app is ad-hoc signed and not notarized, and the Ed25519 update signature is not Apple code signing or notarization. The updater verifies updates itself, but macOS may still apply its own checks to a copy downloaded manually from GitHub.
+
+## Releasing (maintainers)
+
+The public update key and feed (`updates/appcast.xml`) are already configured and committed; contributors and users need no setup. The private signing key lives only in the maintainer's local Keychain (account `dhkimxx.omp-usage-panel`) and is never stored in the repo, CI or an export.
+
+1. Choose the next version with `npm version <next-version> --no-git-tag-version` (the root `package.json` is the single version source; this keeps the lockfile in sync), then commit and push it to a clean `main`.
+2. Publishing needs the existing local Keychain key that matches the committed public key. `release:setup` only establishes a brand-new update channel and is not part of this flow; running it elsewhere would create a key that does not match the pinned public key. If that key is unavailable, signed updates cannot be published until the original key is restored through an OS-supported secure migration.
+3. `npm run release:package -- --output <dir> --notes-file <file>` (both flags optional) builds a signed universal package from a `git archive` of the pinned clean `HEAD`. A dirty local package cannot be published.
+4. `npm run release:publish -- --notes-file <file> [--dry-run]` requires clean `main` equal to the remote and uploads assets before the feed. `--dry-run` verifies everything without publishing, using only temporary extraction.
+
+Sparkle 2.10.1 (pinned) is bundled for updates; see its license terms.
 
 ## Uninstall
 

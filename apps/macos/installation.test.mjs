@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { install, uninstall } from './installation.mjs'
 import { sourceRoot } from './build.mjs'
+import { appTreeHash } from './ownership.mjs'
 
 function fixture() {
   const home = mkdtempSync(path.join(tmpdir(), 'omp-panel-test-'))
@@ -257,5 +258,69 @@ test('legacy uninstall removes only owned UI and retains the provider adoption r
     uninstall(f.options)
     assert.equal(existsSync(f.app), false); assert.equal(existsSync(f.agent), false)
     assert.equal(readFileSync(f.stateFile, 'utf8'), legacy.content); assert.equal(readFileSync(path.join(legacy.release, 'keep'), 'utf8'), 'legacy providers')
+  } finally { f.cleanup() }
+})
+
+/** A built app shaped like the Sparkle build: a framework whose entries are relative symlinks. @param {{outputDirectory:string}} options */
+function frameworkBuild({ outputDirectory }) {
+  const built = path.join(outputDirectory, 'framework.app'), framework = path.join(built, 'Contents/Frameworks/Fake.framework')
+  mkdirSync(path.join(built, 'Contents/MacOS'), { recursive: true }); writeFileSync(path.join(built, 'Contents/MacOS/OMPUsagePanel'), 'binary', { mode: 0o755 })
+  mkdirSync(path.join(framework, 'Versions/B'), { recursive: true }); writeFileSync(path.join(framework, 'Versions/B/Fake'), 'framework', { mode: 0o755 })
+  symlinkSync('B', path.join(framework, 'Versions/Current'), 'dir'); symlinkSync('Versions/Current/Fake', path.join(framework, 'Fake'), 'file')
+  return built
+}
+test('framework symlinks stay relative through install and the shared hash keeps later install and uninstall working', () => {
+  const f = fixture()
+  try {
+    install({ ...f.options, build: frameworkBuild })
+    const framework = path.join(f.app, 'Contents/Frameworks/Fake.framework')
+    assert.equal(readlinkSync(path.join(framework, 'Versions/Current')), 'B'); assert.equal(readlinkSync(path.join(framework, 'Fake')), 'Versions/Current/Fake')
+    assert.equal(JSON.parse(readFileSync(f.stateFile, 'utf8')).appHash, appTreeHash(f.app))
+    install({ ...f.options, build: frameworkBuild })
+    uninstall(f.options)
+    assert.equal(existsSync(f.app), false); assert.equal(existsSync(f.agent), false)
+  } finally { f.cleanup() }
+})
+test('an escaping symlink in the built app is refused before anything is replaced', () => {
+  const f = fixture()
+  try {
+    install(f.options)
+    const executable = path.join(f.app, 'Contents/MacOS/OMPUsagePanel'), binary = readFileSync(executable, 'utf8'), manifest = readFileSync(f.stateFile, 'utf8')
+    /** @param {{outputDirectory:string}} options */
+    const escaping = ({ outputDirectory }) => { const built = frameworkBuild({ outputDirectory }); symlinkSync('../../../outside', path.join(built, 'Contents/escape')); return built }
+    assert.throws(() => install({ ...f.options, build: escaping }), /Symlink escapes app/)
+    assert.equal(f.stopCount(), 0); assert.equal(f.isRunning(), true)
+    assert.equal(readFileSync(executable, 'utf8'), binary); assert.equal(readFileSync(f.stateFile, 'utf8'), manifest)
+  } finally { f.cleanup() }
+})
+test('a modified app in another user\'s ownership is neither updated nor removed', () => {
+  const f = fixture()
+  try {
+    install(f.options)
+    assert.throws(() => install({ ...f.options, owner: (process.getuid?.() ?? 0) + 1 }), /not a private real directory/)
+    assert.throws(() => uninstall({ ...f.options, owner: (process.getuid?.() ?? 0) + 1 }), /not a private real directory/)
+    assert.equal(existsSync(f.app), true); assert.equal(f.stopCount(), 0)
+  } finally { f.cleanup() }
+})
+test('a replacement whose shutdown cannot be verified keeps both apps and the previous agent instead of restoring underneath it', () => {
+  const f = fixture()
+  try {
+    install(f.options)
+    const executable = path.join(f.app, 'Contents/MacOS/OMPUsagePanel'), previous = readFileSync(executable, 'utf8')
+    let sabotage = false, bootoutFails = false
+    /** @param {string} file @param {string[]} args */
+    const run = (file, args) => {
+      if (bootoutFails && args[0] === 'bootout') throw new Error('bootout failed')
+      const result = f.options.run(file, args)
+      // The replacement is running; persisting the new ownership record then fails and its job cannot be stopped.
+      if (sabotage && args[0] === 'bootstrap') { rmSync(f.stateFile); mkdirSync(f.stateFile); writeFileSync(path.join(f.stateFile, 'keep'), 'x'); bootoutFails = true }
+      return result
+    }
+    sabotage = true
+    assert.throws(() => install({ ...f.options, run }), /replacement shutdown could not be verified/)
+    assert.notEqual(readFileSync(executable, 'utf8'), previous); assert.equal(f.isRunning(), true)
+    const applications = readdirSync(path.dirname(f.app)), backup = applications.find(name => name.startsWith('.omp-backup-'))
+    assert.ok(backup, 'previous app preserved'); assert.equal(readFileSync(path.join(path.dirname(f.app), backup, 'Contents/MacOS/OMPUsagePanel'), 'utf8'), previous)
+    assert.ok(readdirSync(path.dirname(f.agent)).some(name => name.startsWith('.omp-agent-')), 'previous agent preserved')
   } finally { f.cleanup() }
 })

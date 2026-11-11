@@ -49,6 +49,9 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private var compactStore: CompactPreferencesStore
     private let settings = CompactSettingsWindowController()
     private let generalSettings = GeneralSettingsWindowController()
+    // One coordinator for the whole app lifetime (owned by AppDelegate). It is independent of `generation`:
+    // usage configuration changes never recreate it or reset its policy.
+    private let updater: UpdaterCoordinator
     private var compactViews: [String: NSView] = [:]
     private var compactCards: [DashboardCard] = []
     private var compactIssue = ""
@@ -91,10 +94,11 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private var generation = 0
     private let positionKey = "dockTopCenter"
     private let legacyPositionKey = "panelPosition"
+    private var updateReevaluationQueued = false
 
-    init(configStore: PanelConfigStore) {
+    init(configStore: PanelConfigStore, updater: UpdaterCoordinator) {
         let config = configStore.config
-        self.configStore = configStore; self.config = config
+        self.configStore = configStore; self.config = config; self.updater = updater
         self.collector = Collector(configPath: configStore.configPath, config: config)
         self.compactStore = CompactPreferencesStore(configPath: configStore.configPath, profile: config.profile)
         self.panel = UsagePanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 24), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -114,11 +118,20 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         dashboard.refresh = { [weak self] in self?.refresh(force: true) }
         dashboard.optionsMenu = { [weak self] in self?.menu() ?? NSMenu() }
         settings.preferencesChanged = { [weak self] in self?.compactPreferencesChanged($0) }
-        generalSettings.saveRequested = { [weak self] candidate in
+        generalSettings.saveRequested = { [weak self] candidate, policy in
             guard let self = self else { return }
-            try self.saveGeneralSettings(candidate)
+            try self.saveGeneralSettings(candidate, policy)
         }
+        generalSettings.checkRequested = { [weak self] in self?.updater.checkForUpdates() }
+        generalSettings.installRequested = { [weak self] in self?.updater.installAvailableUpdate() }
+        generalSettings.interactionReleased = { [weak self] in self?.updateInteractionMayHaveReleased() }
         generalSettings.configLocation = configStore.configPath
+        updater.canPresentNotice = { [weak self] in self?.updateNoticeIsQuiet ?? false }
+        updater.canInstallUpdate = { [weak self] explicit in self?.updateCutoverIsSafe(explicit: explicit) ?? false }
+        updater.statusChanged = { [weak self] status in self?.generalSettings.updateStatus(status) }
+        updater.policyChanged = { [weak self] policy in self?.generalSettings.committedPolicyChanged(policy) }
+        updater.showUpdatesRequested = { [weak self] in self?.presentUpdates(check: false) }
+        generalSettings.updateStatus(updater.status)
         detail.selectScope = { [weak self] scope in self?.openDetail(scope: scope) }
         detail.selectAccount = { [weak self] key in
             self?.selectedAccount = key
@@ -138,6 +151,9 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
         bindCollector()
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        if let compactWindow = settings.window {
+            NotificationCenter.default.addObserver(self, selector: #selector(compactSettingsClosed), name: NSWindow.willCloseNotification, object: compactWindow)
+        }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sessionBecameActive), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 53, let self = self,
@@ -187,6 +203,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         keyMonitor = nil; localPointerMonitor = nil; globalPointerMonitor = nil
     }
     @objc private func screensChanged() { positionPanel() }
+    @objc private func compactSettingsClosed() { updateInteractionMayHaveReleased() }
     @objc private func sessionBecameActive() { screensChanged(); renderHeader() }
     @objc private func refreshAction() { refresh(force: true) }
     private func refresh(force: Bool = false, ignoringHolds: Bool = false) {
@@ -210,12 +227,17 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
             self.refresh()
         }
     }
-    private func saveGeneralSettings(_ candidate: PanelConfig) throws {
+    private func saveGeneralSettings(_ candidate: PanelConfig, _ policy: UpdatePolicy) throws {
         // Persist first: a validation or write failure throws here and leaves the running configuration untouched.
+        // The updater policy lives in a different store, so it is committed only after the configuration succeeded.
         try configStore.save(candidate)
         let committed = configStore.config
-        guard committed != config else { return }
-        applyConfiguration(committed)
+        if committed != config {
+            let nodeChanged = committed.nodePath != config.nodePath
+            applyConfiguration(committed)
+            if nodeChanged { updater.updateRuntime(config: committed, configPath: configStore.configPath) }
+        }
+        if policy != updater.policy { updater.applyPolicy(policy) }
     }
     // Synchronous main-thread transition to a freshly committed configuration. Nothing from the previous one
     // (collector, queued timer fire, result, selection, disclosure, tooltip or catalog) survives it, and no
@@ -450,6 +472,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
                                  detailBlend: initialBlend + (blend - initialBlend) * progress)
                 if finished {
                     self.frameAnimation = nil; self.animationTarget = nil; self.panel.invalidateShadow()
+                    if expansion == 0 { self.updateInteractionMayHaveReleased() }
                 }
             }
             animationTarget = layout; animationTargetExpansion = expansion; animationTargetBlend = blend
@@ -458,6 +481,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         } else {
             applyLayout(layout, expansion: expansion, detailBlend: blend)
             panel.invalidateShadow()
+            if expansion == 0 { updateInteractionMayHaveReleased() }
         }
         if manualTopCenter != nil {
             manualTopCenter = CGPoint(x: layout.frame.midX, y: layout.frame.maxY)
@@ -575,7 +599,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private func draggingChanged(_ active: Bool) {
         cancelHover(); interaction.setDragging(active)
         if !active { updatePointerAfterHold() }
-        if active { positionPanel() } else { renderHeader() }
+        if active { positionPanel() } else { renderHeader(); updateInteractionMayHaveReleased() }
     }
     private func dragTo(_ origin: NSPoint) {
         manualTopCenter = origin
@@ -636,7 +660,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         cancelHover()
         let menu = NSMenu(title: "Usage options"); menu.delegate = self
         func item(_ title: String, _ action: Selector) { let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item) }
-        item("Refresh", #selector(refreshAction)); item("Settings…", #selector(openGeneralSettings)); item("Compact settings…", #selector(openCompactSettings)); item("Open data folder", #selector(openData)); item("Reset position", #selector(resetPosition)); menu.addItem(.separator()); item("Quit", #selector(quit))
+        item("Refresh", #selector(refreshAction)); item("Settings…", #selector(openGeneralSettings)); item("Compact settings…", #selector(openCompactSettings)); item("Check for Updates…", #selector(openUpdates)); item("Open data folder", #selector(openData)); item("Reset position", #selector(resetPosition)); menu.addItem(.separator()); item("Quit", #selector(quit))
         return menu
     }
     func menuWillOpen(_ menu: NSMenu) {
@@ -649,7 +673,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         cancelHover()
         interaction.setMenuOpen(active)
         if active { positionPanel() }
-        else { updatePointerAfterHold(); renderHeader(animated: true) }
+        else { updatePointerAfterHold(); renderHeader(animated: true); updateInteractionMayHaveReleased() }
     }
     @objc private func openCompactSettings() {
         // A menu action runs before menu tracking has released its hold; present afterwards.
@@ -664,10 +688,54 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         // Same deferral as compact settings: menu tracking releases its hold before the panel is dismissed.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.generalSettings.edit(config: self.config, result: self.result)
+            self.generalSettings.edit(config: self.config, updatePolicy: self.updater.policy, result: self.result)
             self.dismiss()
             self.generalSettings.showWindow(nil)
         }
+    }
+    @objc private func openUpdates() {
+        // A deliberate menu action: wait for menu tracking to release, then show the Updates tab and check.
+        DispatchQueue.main.async { [weak self] in self?.presentUpdates(check: true) }
+    }
+    private func presentUpdates(check: Bool) {
+        generalSettings.edit(config: config, updatePolicy: updater.policy, result: result)
+        dismiss()
+        generalSettings.showWindow(nil)
+        generalSettings.selectUpdatesTab()
+        if check { updater.checkForUpdates() }
+    }
+    // Re-evaluates a pending update notice or automatic cutover on the next main-loop turn: windows still report
+    // themselves visible while their close notification is being delivered.
+    private func updateInteractionMayHaveReleased() {
+        guard !updateReevaluationQueued else { return }
+        updateReevaluationQueued = true
+        DispatchQueue.main.async { [weak self] in
+            self?.updateReevaluationQueued = false
+            self?.updater.interactionBecameSafe()
+        }
+    }
+    private var anySheetOrModal: Bool {
+        NSApp.modalWindow != nil || NSApp.windows.contains { $0.attachedSheet != nil }
+    }
+    // An unsolicited update notice appears only when nothing could be interrupted: no settings window (visible or
+    // minimized), sheet, modal, menu, drag, mouse button, or expanded/animating panel.
+    private var updateNoticeIsQuiet: Bool {
+        let compactSettingsInUse = settings.window.map { $0.isVisible || $0.isMiniaturized } ?? false
+        return !generalSettings.isInUse && !compactSettingsInUse && !anySheetOrModal
+            && !interaction.isMenuOpen && !interaction.isDragging && interaction.presentation == .compact
+            && currentExpansion == 0 && frameAnimation == nil && NSEvent.pressedMouseButtons == 0
+    }
+    // A deliberate Update Now must not drop edits: unsaved Settings changes, a compact settings window, a sheet,
+    // modal, menu or drag all refuse it. A clean open Settings window holds nothing to lose, so it stays usable.
+    private var updateInstallIsSafe: Bool {
+        let compactSettingsInUse = settings.window.map { $0.isVisible || $0.isMiniaturized } ?? false
+        return !generalSettings.hasUnsavedChanges && !compactSettingsInUse && !anySheetOrModal
+            && !interaction.isMenuOpen && !interaction.isDragging
+    }
+    // An automatic cutover has no user action behind it, so it needs the full presentation guard as well: any visible
+    // or minimized Settings window (even a clean one), sheet, menu, drag, held mouse or expanded panel defers it.
+    private func updateCutoverIsSafe(explicit: Bool) -> Bool {
+        explicit ? updateInstallIsSafe : (updateInstallIsSafe && updateNoticeIsQuiet)
     }
     @objc private func openData() { NSWorkspace.shared.open(URL(fileURLWithPath: configStore.configPath).deletingLastPathComponent()) }
     @objc private func quit() { NSApp.terminate(nil) }

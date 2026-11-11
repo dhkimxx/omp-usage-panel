@@ -176,4 +176,28 @@ func runGeneralSettingsDraftTests() {
     precondition(catalog.limitSuggestions(provider: "mistral", config: configured) == ["monthly", "daily", "weekly"], "observed limit IDs plus the configured one")
     precondition(catalog.limitSuggestions(provider: "metric-only", config: configured) == ["custom-limit"] && catalog.limitSuggestions(provider: "nope", config: configured).isEmpty)
     precondition(Draft.Catalog(result: nil) == Draft.Catalog() && Draft.Catalog(result: nil).providerSuggestions(config: configured) == ["custom-provider", "mistral", "label-only", "metric-only"])
+
+    // Change tracking compares resulting values only; typing then reverting (or add then remove) is not a change.
+    let tracked = draftConfig(providers: ["a"], labels: ["a": "A"])
+    let committedPolicy = UpdatePolicy(automaticChecks: true, automaticInstallation: false, notificationsEnabled: true)
+    var edited = Draft(config: tracked, updatePolicy: committedPolicy)
+    precondition(!edited.hasChanges(from: tracked, updatePolicy: committedPolicy))
+    edited.setText("61", for: .refreshSeconds)
+    precondition(edited.hasChanges(from: tracked, updatePolicy: committedPolicy))
+    edited.setText(Draft.format(60), for: .refreshSeconds)
+    let transient = edited.addRow(.labels, key: "b", value: "B")
+    precondition(edited.hasChanges(from: tracked, updatePolicy: committedPolicy))
+    edited.removeRow(.labels, id: transient)
+    precondition(!edited.hasChanges(from: tracked, updatePolicy: committedPolicy), "reverted edits are not unsaved changes")
+    edited.updatePolicy.automaticInstallation = true
+    precondition(edited.hasChanges(from: tracked, updatePolicy: committedPolicy), "a staged update choice counts as unsaved")
+    precondition(committed(edited) == tracked, "update choices never enter the collector configuration")
+
+    // A policy committed elsewhere reaches untouched staged choices only; the user's staged edits survive.
+    var staged = Draft(config: tracked, updatePolicy: committedPolicy)
+    staged.updatePolicy.automaticInstallation = true
+    let changedElsewhere = UpdatePolicy(automaticChecks: true, automaticInstallation: false, notificationsEnabled: false)
+    staged.rebaseUpdatePolicy(from: committedPolicy, to: changedElsewhere)
+    precondition(staged.updatePolicy == UpdatePolicy(automaticChecks: true, automaticInstallation: true, notificationsEnabled: false))
+    precondition(staged.hasChanges(from: tracked, updatePolicy: changedElsewhere))
 }

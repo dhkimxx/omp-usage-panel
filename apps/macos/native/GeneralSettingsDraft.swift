@@ -131,6 +131,8 @@ struct GeneralSettingsDraft: Equatable {
     var warnPercent: String
     var criticalPercent: String
     var showPace: Bool
+    /// Staged app-wide updater choices. They are committed separately from `PanelConfig` (different store).
+    var updatePolicy: UpdatePolicy
     /// Automatic (`providers: null`) versus Custom (an ordered array, possibly empty). Rows survive mode switches.
     var providerMode: ProviderMode
     private(set) var providerRows: [Row] = []
@@ -138,7 +140,7 @@ struct GeneralSettingsDraft: Equatable {
     private(set) var metricRows: [Row] = []
     private var nextRowID = 0
 
-    init(config: PanelConfig) {
+    init(config: PanelConfig, updatePolicy: UpdatePolicy = .defaults) {
         version = config.version
         nodePath = config.nodePath
         ompPath = config.ompPath
@@ -149,10 +151,35 @@ struct GeneralSettingsDraft: Equatable {
         warnPercent = Self.format(config.warnPercent)
         criticalPercent = Self.format(config.criticalPercent)
         showPace = config.showPace
+        self.updatePolicy = updatePolicy
         providerMode = config.providers == nil ? .automatic : .custom
         for provider in config.providers ?? [] { addRow(.providers, key: provider) }
         for entry in config.labels.sortedEntries { addRow(.labels, key: entry.key, value: entry.value) }
         for entry in config.metrics.sortedEntries { addRow(.metrics, key: entry.key, value: entry.value) }
+    }
+
+    // MARK: Change tracking
+
+    /// True when the staged values differ from the committed ones. Row identities and raw text typed-then-reverted
+    /// are ignored: only the resulting values count. Used to refuse an update restart that would drop edits.
+    func hasChanges(from config: PanelConfig, updatePolicy committedPolicy: UpdatePolicy) -> Bool {
+        let base = GeneralSettingsDraft(config: config, updatePolicy: committedPolicy)
+        func values(_ rows: [Row]) -> [[String]] { rows.map { [$0.key, $0.value] } }
+        return nodePath != base.nodePath || ompPath != base.ompPath || profile != base.profile
+            || refreshSeconds != base.refreshSeconds || cacheMinutes != base.cacheMinutes
+            || timeoutSeconds != base.timeoutSeconds || warnPercent != base.warnPercent
+            || criticalPercent != base.criticalPercent || showPace != base.showPace
+            || providerMode != base.providerMode || updatePolicy != base.updatePolicy
+            || values(providerRows) != values(base.providerRows) || values(labelRows) != values(base.labelRows)
+            || values(metricRows) != values(base.metricRows)
+    }
+
+    /// Follows a committed policy change made elsewhere (for example "Turn Off Notifications" in the update
+    /// notice): a choice the user has not touched adopts the new committed value; a staged edit is kept.
+    mutating func rebaseUpdatePolicy(from old: UpdatePolicy, to new: UpdatePolicy) {
+        if updatePolicy.automaticChecks == old.automaticChecks { updatePolicy.automaticChecks = new.automaticChecks }
+        if updatePolicy.automaticInstallation == old.automaticInstallation { updatePolicy.automaticInstallation = new.automaticInstallation }
+        if updatePolicy.notificationsEnabled == old.notificationsEnabled { updatePolicy.notificationsEnabled = new.notificationsEnabled }
     }
 
     // MARK: Text fields

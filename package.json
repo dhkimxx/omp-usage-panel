@@ -12,7 +12,10 @@
     "verify": "npm run check && npm test",
     "macos:build": "node apps/macos/build.mjs",
     "macos:install": "node apps/macos/install.mjs",
-    "macos:uninstall": "node apps/macos/uninstall.mjs"
+    "macos:uninstall": "node apps/macos/uninstall.mjs",
+    "release:setup": "node apps/macos/release.mjs setup",
+    "release:package": "node apps/macos/release.mjs package",
+    "release:publish": "node apps/macos/release.mjs publish"
   },
   "devDependencies": {
     "@types/node": "22.20.5",

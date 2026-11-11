@@ -26,12 +26,20 @@ private final class GeneralRowControls {
     }
 }
 
-/// The native Settings window for the editable `config.json` fields. Everything edits a transactional
-/// `GeneralSettingsDraft`; nothing reaches disk or the running panel until Save & Apply succeeds through
-/// `saveRequested`. Cancel or closing the window discards the draft.
+/// The native Settings window for the editable `config.json` fields and the app-wide updater choices. Everything
+/// edits a transactional `GeneralSettingsDraft`; nothing reaches disk or the running panel until Save & Apply
+/// succeeds through `saveRequested` (collector configuration first, then the staged update policy). Cancel or
+/// closing the window discards the draft. Check Now and Update Now are explicit immediate actions, not part of
+/// the draft; update status refreshes never touch the draft, the selected tab or the focus.
 final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegate, NSComboBoxDelegate {
     /// Synchronous commit hook. Must persist and apply the candidate or throw; a throw keeps the draft open.
-    var saveRequested: ((PanelConfig) throws -> Void)?
+    var saveRequested: ((PanelConfig, UpdatePolicy) throws -> Void)?
+    /// Immediate manual update actions. They never read or commit the draft.
+    var checkRequested: (() -> Void)?
+    var installRequested: (() -> Void)?
+    /// Called when a window state that blocked an unsolicited update prompt or restart may have ended
+    /// (window closed, sheet dismissed). The window is still on screen during the call; defer the re-evaluation.
+    var interactionReleased: (() -> Void)?
     /// Optional read-only location of the configuration file shown on the Runtime tab.
     var configLocation: String? { didSet { locationValue.stringValue = configLocation ?? "Not available" } }
 
@@ -42,6 +50,8 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
 
     private var draft: Draft?
     private var baseline: PanelConfig?
+    private var baselinePolicy = UpdatePolicy.defaults
+    private var updateStatusValue: UpdateStatus?
     private var catalog = Draft.Catalog()
     private var isApplyingProgrammaticUpdate = false
     private var pendingSuggestionRefresh = false
@@ -66,6 +76,24 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let saveButton = NSButton(title: "Save & Apply", target: nil, action: nil)
 
+    private let updatesVersionValue = NSTextField(labelWithString: "")
+    private let automaticChecksCheckbox = NSButton(checkboxWithTitle: "Check for updates automatically", target: nil, action: nil)
+    private let notificationsCheckbox = NSButton(checkboxWithTitle: "Show a notice when an update is available", target: nil, action: nil)
+    private let automaticInstallCheckbox = NSButton(checkboxWithTitle: "Download and install updates automatically", target: nil, action: nil)
+    private let updateStatusLabel = NSTextField(wrappingLabelWithString: "")
+    private let updateAvailableLabel = NSTextField(labelWithString: "")
+    private let updateCheckedLabel = NSTextField(labelWithString: "")
+    private let updateSkippedLabel = NSTextField(wrappingLabelWithString: "")
+    private let updateProgress = NSProgressIndicator()
+    private let checkNowButton = NSButton(title: "Check Now", target: nil, action: nil)
+    private let updateNowButton = NSButton(title: "Update Now", target: nil, action: nil)
+    private static let lastCheckedFormat: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
     init() {
         let window = SettingsWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
                                     styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -85,16 +113,49 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
 
     /// Starts a fresh draft from the committed config when the window is closed. While it is open the draft is
     /// kept as is (only observed suggestions refresh). Never presents or activates the window.
-    func edit(config: PanelConfig, result: PanelResult?) {
+    func edit(config: PanelConfig, updatePolicy: UpdatePolicy, result: PanelResult?) {
         catalog = Draft.Catalog(result: result)
         if draft != nil, let window, window.isVisible || window.isMiniaturized {
             refreshSuggestions()
             return
         }
         baseline = config
-        draft = Draft(config: config)
+        baselinePolicy = updatePolicy
+        draft = Draft(config: config, updatePolicy: updatePolicy)
         loadControlsFromDraft()
         refreshSuggestions()
+    }
+
+    /// True while unsaved edits (collector configuration or staged update choices) exist.
+    var hasUnsavedChanges: Bool {
+        guard let draft, let baseline else { return false }
+        return draft.hasChanges(from: baseline, updatePolicy: baselinePolicy)
+    }
+
+    /// Visible or minimized: an unsolicited update prompt must stay quiet.
+    var isInUse: Bool {
+        guard let window else { return false }
+        return window.isVisible || window.isMiniaturized || window.attachedSheet != nil
+    }
+
+    /// Shows the latest updater status. Changes labels and button states only; never the draft, tab or focus.
+    func updateStatus(_ status: UpdateStatus) {
+        updateStatusValue = status
+        renderUpdateStatus()
+    }
+
+    /// A committed policy changed outside this window (for example in the update notice). Untouched staged
+    /// choices follow it; edited ones are kept, so nothing the user typed is overwritten.
+    func committedPolicyChanged(_ policy: UpdatePolicy) {
+        let previous = baselinePolicy
+        baselinePolicy = policy
+        guard draft != nil else { return }
+        draft?.rebaseUpdatePolicy(from: previous, to: policy)
+        loadUpdatePolicyControls()
+    }
+
+    func selectUpdatesTab() {
+        tabView.selectTabViewItem(withIdentifier: "Updates")
     }
 
     /// Changes only the observed ID suggestions; never the draft, the committed config, focus or the save hook.
@@ -114,6 +175,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         baseline = nil
         pendingSuggestionRefresh = false
         hideAllIssues()
+        interactionReleased?()
     }
 
     // MARK: Layout
@@ -127,6 +189,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         addTab("Labels", labelsPage())
         addTab("Metrics", metricsPage())
         addTab("Runtime", runtimePage())
+        addTab("Updates", updatesPage())
         tabView.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
 
         bannerLabel.font = .systemFont(ofSize: 12)
@@ -175,6 +238,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         modeControl.selectedSegment = 0
         updateModeState()
         updateObservedLabel()
+        renderUpdateStatus()
     }
 
     private func addTab(_ title: String, _ page: NSScrollView) {
@@ -407,6 +471,77 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         ])
     }
 
+    private func updatesPage() -> NSScrollView {
+        let installed = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        switch (installed, build) {
+        case let (version?, build?) where build != version: updatesVersionValue.stringValue = "Installed version \(version) (build \(build))"
+        case let (version?, _): updatesVersionValue.stringValue = "Installed version \(version)"
+        default: updatesVersionValue.stringValue = "Installed version unknown"
+        }
+        updatesVersionValue.isSelectable = true
+        updatesVersionValue.setAccessibilityIdentifier("general.updates.version")
+
+        automaticChecksCheckbox.target = self
+        automaticChecksCheckbox.action = #selector(automaticChecksChanged)
+        automaticChecksCheckbox.setAccessibilityIdentifier("general.updates.automaticChecks")
+        automaticChecksCheckbox.setAccessibilityLabel("Check for updates automatically")
+        notificationsCheckbox.target = self
+        notificationsCheckbox.action = #selector(notificationsChanged)
+        notificationsCheckbox.setAccessibilityIdentifier("general.updates.notifications")
+        notificationsCheckbox.setAccessibilityLabel("Show a notice when an update is available")
+        automaticInstallCheckbox.target = self
+        automaticInstallCheckbox.action = #selector(automaticInstallChanged)
+        automaticInstallCheckbox.setAccessibilityIdentifier("general.updates.automaticInstall")
+        automaticInstallCheckbox.setAccessibilityLabel("Download and install updates automatically")
+
+        updateStatusLabel.isSelectable = true
+        updateStatusLabel.setAccessibilityIdentifier("general.updates.status")
+        updateAvailableLabel.setAccessibilityIdentifier("general.updates.available")
+        updateCheckedLabel.textColor = .secondaryLabelColor
+        updateCheckedLabel.font = .systemFont(ofSize: 11)
+        updateCheckedLabel.setAccessibilityIdentifier("general.updates.lastChecked")
+        updateSkippedLabel.textColor = .secondaryLabelColor
+        updateSkippedLabel.font = .systemFont(ofSize: 11)
+        updateSkippedLabel.setAccessibilityIdentifier("general.updates.skipped")
+
+        updateProgress.style = .spinning
+        updateProgress.controlSize = .small
+        updateProgress.isIndeterminate = true
+        updateProgress.isDisplayedWhenStopped = false
+        updateProgress.setAccessibilityIdentifier("general.updates.progress")
+        updateProgress.setAccessibilityLabel("Update in progress")
+        checkNowButton.target = self
+        checkNowButton.action = #selector(checkNowClicked)
+        checkNowButton.setAccessibilityIdentifier("general.updates.check")
+        updateNowButton.target = self
+        updateNowButton.action = #selector(updateNowClicked)
+        updateNowButton.setAccessibilityIdentifier("general.updates.install")
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let actionViews: [NSView] = [checkNowButton, updateNowButton, updateProgress, spacer]
+        let actions = NSStackView(views: actionViews)
+        actions.orientation = .horizontal
+        actions.spacing = 8
+        actions.alignment = .centerY
+
+        return makePage([
+            heading("Updates"),
+            updatesVersionValue,
+            group([automaticChecksCheckbox, hint("Looks for a new version about once a day. Manual checks always work, even when this is off.")]),
+            group([notificationsCheckbox, hint("Shows a small notice that never takes keyboard focus. Turning this off never changes how updates are installed.")]),
+            group([automaticInstallCheckbox, hint("Off by default. When on, updates found by automatic checks are downloaded and installed, then the panel restarts once nothing is being edited. Requires automatic checks.")]),
+            hint("These three choices apply when you press Save & Apply."),
+            heading("Status"),
+            updateStatusLabel,
+            updateAvailableLabel,
+            updateCheckedLabel,
+            updateSkippedLabel,
+            actions,
+            hint("Check Now and Update Now act immediately and are not part of Save & Apply. Update Now installs only this update and restarts the panel. Checking contacts the update feed; no usage, account or configuration data is sent."),
+        ])
+    }
+
     /// Rows container, list-level error and the Add button for one list.
     private func listSection(_ list: Draft.RowList, addTitle: String, addIdentifier: String, add: Selector) -> [NSView] {
         let rows = NSStackView()
@@ -598,6 +733,66 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
     @objc private func addLabelRow() { addRow(.labels) }
     @objc private func addMetricRow() { addRow(.metrics) }
 
+    @objc private func automaticChecksChanged() {
+        draft?.updatePolicy.automaticChecks = automaticChecksCheckbox.state == .on
+        updateAutomaticInstallEnablement()
+    }
+    @objc private func notificationsChanged() { draft?.updatePolicy.notificationsEnabled = notificationsCheckbox.state == .on }
+    @objc private func automaticInstallChanged() { draft?.updatePolicy.automaticInstallation = automaticInstallCheckbox.state == .on }
+
+    // MARK: Updates
+
+    private func loadUpdatePolicyControls() {
+        guard let policy = draft?.updatePolicy else { return }
+        automaticChecksCheckbox.state = policy.automaticChecks ? .on : .off
+        notificationsCheckbox.state = policy.notificationsEnabled ? .on : .off
+        automaticInstallCheckbox.state = policy.automaticInstallation ? .on : .off
+        updateAutomaticInstallEnablement()
+    }
+
+    private func updateAutomaticInstallEnablement() {
+        let enabled = automaticChecksCheckbox.state == .on
+        if automaticInstallCheckbox.isEnabled != enabled { automaticInstallCheckbox.isEnabled = enabled }
+    }
+
+    private func setEnabled(_ button: NSButton, _ enabled: Bool) {
+        if button.isEnabled != enabled { button.isEnabled = enabled }
+    }
+
+    private func renderUpdateStatus() {
+        guard let status = updateStatusValue else {
+            updateStatusLabel.stringValue = "Update status is not available yet."
+            updateStatusLabel.textColor = .secondaryLabelColor
+            updateAvailableLabel.isHidden = true
+            updateCheckedLabel.stringValue = "Not checked yet."
+            updateSkippedLabel.isHidden = true
+            updateProgress.stopAnimation(nil)
+            setEnabled(checkNowButton, false)
+            setEnabled(updateNowButton, false)
+            return
+        }
+        updateStatusLabel.stringValue = status.message
+        updateStatusLabel.textColor = status.phase == .failed ? .systemRed : (status.installBlocked ? .systemOrange : .labelColor)
+        if let version = status.availableVersion {
+            updateAvailableLabel.stringValue = "Available version: \(version)"
+            updateAvailableLabel.isHidden = false
+        } else {
+            updateAvailableLabel.stringValue = ""
+            updateAvailableLabel.isHidden = true
+        }
+        updateCheckedLabel.stringValue = status.lastCheckedAt.map { "Last checked: " + Self.lastCheckedFormat.string(from: $0) } ?? "Not checked yet."
+        if let skipped = status.lastSkippedVersion {
+            updateSkippedLabel.stringValue = "You skipped version \(skipped). Automatic notices and installs skip it; Check Now still offers it."
+            updateSkippedLabel.isHidden = false
+        } else {
+            updateSkippedLabel.stringValue = ""
+            updateSkippedLabel.isHidden = true
+        }
+        if status.phase.isBusy { updateProgress.startAnimation(nil) } else { updateProgress.stopAnimation(nil) }
+        setEnabled(checkNowButton, !status.phase.isBusy)
+        setEnabled(updateNowButton, status.canInstall && !status.phase.isBusy)
+    }
+
     // MARK: Rendering
 
     private func loadControlsFromDraft() {
@@ -606,6 +801,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         defer { isApplyingProgrammaticUpdate = false }
         for (field, control) in fieldControls { control.stringValue = draft.text(for: field) }
         paceCheckbox.state = draft.showPace ? .on : .off
+        loadUpdatePolicyControls()
         modeControl.selectedSegment = draft.providerMode == .custom ? 1 : 0
         versionValue.stringValue = "Schema version \(draft.version) (read-only)"
         hideAllIssues()
@@ -770,6 +966,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         let current = control.stringValue
         if current.hasPrefix("/") { panel.directoryURL = URL(fileURLWithPath: current).deletingLastPathComponent() }
         panel.beginSheetModal(for: window) { [weak self, weak control] response in
+            DispatchQueue.main.async { self?.interactionReleased?() }
             guard response == .OK, let url = panel.url, let self, let control else { return }
             control.stringValue = url.path
             self.draft?.setText(url.path, for: field)
@@ -779,28 +976,51 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
 
     @objc private func cancelClicked() { close() }
 
-    @objc private func saveClicked() {
-        guard draft != nil else { return }
+    @objc private func checkNowClicked() { checkRequested?() }
+
+    @objc private func updateNowClicked() {
+        guard installRequested != nil else { return }
+        // Installing restarts the panel, so unsaved edits are never dropped silently: save them first or keep editing.
+        window?.endEditing(for: nil)
+        guard hasUnsavedChanges, let window else { installRequested?(); return }
+        let alert = NSAlert()
+        alert.messageText = "Save your settings before updating?"
+        alert.informativeText = "Updating restarts OMP Usage Panel. Save & Apply your unsaved changes first, or keep editing and update later."
+        alert.addButton(withTitle: "Save & Apply, Then Update")
+        alert.addButton(withTitle: "Keep Editing")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            DispatchQueue.main.async { self?.interactionReleased?() }
+            guard response == .alertFirstButtonReturn, let self, self.commit() else { return }
+            self.installRequested?()
+        }
+    }
+
+    @objc private func saveClicked() { _ = commit() }
+
+    /// Validates and commits the draft; true when it was committed and the window closed.
+    private func commit() -> Bool {
+        guard draft != nil else { return false }
         // Commit any in-progress edit (including IME composition) and re-read every control into the draft.
         window?.endEditing(for: nil)
         for binding in Array(bindings.values) {
             if let control = binding.control { binding.apply(control.stringValue) }
         }
         hideAllIssues()
-        guard let current = draft else { return }
+        guard let current = draft else { return false }
         let candidate: PanelConfig
         do { candidate = try current.candidate() }
-        catch let failure as Draft.Failure { showIssues(failure.issues); return }
-        catch { showBanner(error.localizedDescription); return }
+        catch let failure as Draft.Failure { showIssues(failure.issues); return false }
+        catch { showBanner(error.localizedDescription); return false }
         guard let handler = saveRequested else {
             showBanner("Saving is not connected to the running panel. Nothing was changed.")
-            return
+            return false
         }
-        do { try handler(candidate) }
+        do { try handler(candidate, current.updatePolicy) }
         catch {
             showBanner("Could not save settings: \(error.localizedDescription) Your edits are kept.")
-            return
+            return false
         }
         close()
+        return true
     }
 }

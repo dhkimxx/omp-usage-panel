@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:omp="https://github.com/dhkimxx/omp-usage-panel/updates">
+  <channel>
+    <title>OMP Usage</title>
+    <link>https://github.com/dhkimxx/omp-usage-panel</link>
+    <description>Signed OMP Usage application updates</description>
+    <language>en</language>
+  </channel>
+</rss>
+<!-- sparkle-signatures:
+edSignature: 02RL/m4JW/RbpKDW1egirrO7Q/NQFoPGlIjLIbq6MQ/e6wKOjCYsMwtfb+WHztqqHAuxL61UCUUYwq5D1gCwBQ==
+length: 407
+-->

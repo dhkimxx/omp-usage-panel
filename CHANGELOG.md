@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add GitHub updates through pinned Sparkle 2.10.1: daily checks and notifications on, automatic installation off by default, a native Update Now / Skip This Version / Later / Turn Off Notifications prompt, optional automatic-install consent, manual **Check for Updates…** and an app-wide **Updates** settings tab with Save & Apply / Cancel. Automatic restarts wait until the app is idle.
+- Authenticate the feed and archive with Ed25519 and a signed app-tree hash; restart the original LaunchAgent from an out-of-bundle watcher, require native startup acknowledgment and roll back on failed health, preserving config, auth and provider plugins.
+- Source install is now a one-time bootstrap; later updates are prebuilt universal (arm64 + x86_64) apps. Updates remain ad-hoc signed and not notarized.
+- Add maintainer `release:setup` (initial channel establishment only), `release:package` and `release:publish --notes-file <file> [--dry-run]` flow with the root `package.json` version as authority and the signing key held only in the local Keychain. No prebuilt update has been published in the signed feed yet.
+
 - Replace **Open config** with a native **Settings…** window that edits every user-editable configuration field (collection, display, providers, labels, metrics, runtime) with **Save & Apply** and **Cancel**; authentication remains managed by omp.
 - Persist Settings saves by validating the complete configuration and atomically replacing the private config file, leaving the file and running configuration unchanged on failure.
 - Apply saved settings live by replacing the collector and refresh timer in place, ignoring stale results from earlier generations, and resetting old profile data and details when the profile changes.
