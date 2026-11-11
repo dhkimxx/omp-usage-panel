@@ -1,101 +1,63 @@
 # omp-usage-dashboard
 
-Standalone usage dashboard for [omp](https://github.com/can1357/oh-my-pi). Native macOS AppKit app and a shared Node.js collector; no interactive omp session required.
+Standalone usage dashboard for [omp](https://github.com/can1357/oh-my-pi): a native macOS AppKit app on a shared Node.js collector. No interactive omp session required.
 
-```mermaid
-flowchart LR
-    A[Usage fetchers registered in omp] --> B[omp usage --json]
-    B --> C[usage-core: normalize and cache]
-    C --> D[macOS AppKit dashboard]
-```
+It shows whichever providers and accounts your installed omp supports. Installing or removing it does not install, retarget, or remove provider plugins.
 
-Provider API/authentication patches live outside this repository. They are optional: this dashboard reads whichever providers and accounts your installed omp supports. Installing or removing the dashboard does not install, retarget, or remove provider plugins.
+## Install
 
-The common collector and JSON schema are independent of AppKit.
-
-## Install on macOS
-
-Requires macOS 13+, Node.js **22.18+**, an installed and authenticated omp supporting `omp usage --json`, and Xcode Command Line Tools (`swiftc`, `codesign`) to build. The installed app needs Node and omp, not development dependencies or Bun. Locally exercised with omp **18.18.6**.
+Requires macOS 13+, Node.js **22.18+**, and an authenticated omp that supports `omp usage --json`. Building also needs Xcode Command Line Tools (`swiftc`, `codesign`). Tested with omp 18.18.6.
 
 ```sh
 git clone https://github.com/dhkimxx/omp-usage-dashboard.git
 cd omp-usage-dashboard
 npm ci
-npm run macos:install -- --dry-run
+npm run macos:install -- --dry-run   # preview
 npm run macos:install
 ```
 
-If omp is not discoverable, set `OMP_BIN=/absolute/path/to/omp` for the initial installation. Existing configuration is preserved; environment defaults do not overwrite it on reinstall.
+If omp is not discoverable, set `OMP_BIN=/absolute/path/to/omp` for the first install. Reinstalling keeps your existing configuration.
 
-| Installed resource | Location |
-| --- | --- |
-| App and bundled collector | `~/Applications/OMP Usage.app` |
-| Configuration and ownership records | `~/Library/Application Support/omp-usage-panel/` |
-| Login LaunchAgent | `~/Library/LaunchAgents/com.dhkim.omp-usage-panel.plist` |
-| Usage cache | `~/Library/Caches/omp-usage/` |
+The app is installed to `~/Applications/OMP Usage.app` with its own copy of the collector, so the checkout can be moved or deleted. Node and omp must stay at the paths in `config.json`. Source updates require reinstalling. The build is ad-hoc signed for the current Mac architecture and not notarized.
 
-**The checkout may be moved or deleted after installation.** Node and omp must remain executable at the absolute paths recorded in `config.json`. Source updates require reinstalling the app.
+## Use
 
-This release is **source-install distribution**, not a self-contained/notarized binary. It builds for the current Mac architecture and uses ad-hoc signing. To build without installing: `npm run macos:build` → `build/OMP Usage.app`.
+- On a notched screen the panel sits around the camera. Otherwise it floats below the menu bar.
+- Hover to preview, click to pin. **Escape** or an outside click collapses it.
+- **Options** (or right-click): refresh, all accounts, open config/data folder, reset position, quit.
+- The summary is the highest single observed utilization, not an account total. Unknown values are not zero.
 
-### Migration from the previous installer
-
-The existing app identifier, LaunchAgent, configuration/cache paths and saved window position are retained, so there is no second app or startup job. The installer verifies ownership before replacement and restores the previous app/job if activation fails. Modified or foreign installations are refused rather than overwritten.
-
-Old installation records are retained as `install-v1.json` when migrating to the dashboard-only ownership record. Historical provider releases are left untouched.
-
-## Display and controls
-
-- **Notched screen:** the compact black silhouette follows the camera footprint, with thin provider usage lines immediately below it. Hover expands one pure-black board attached directly to the screen top; the camera sits inside an empty header region, with no connecting neck. The expanded board temporarily covers the central menu-bar area and app content.
-- **No notch or manual position:** a floating dashboard stays below the menu bar. Hold **Option** when starting a drag to detach and save its position. **Reset position** returns to automatic placement.
-- Click a provider line/card for every account and limit belonging to it. **Accounts** opens all connected accounts; **Refresh** bypasses the cache. Details, menus and dragging keep the board open; outside click or **Escape** closes details.
-- **Options** / right-click: refresh, all accounts, open config/data folder, reset position, quit. Re-entering during collapse reverses the animation; Reduce Motion disables it.
-- Gray tracks show the unused portion; colored fills show usage. The contrasting `|` marks elapsed time where a valid period exists. Mistral calendar-month estimates are explicitly labeled **Estimated**, never used to alter account-selection/exhaustion behavior.
-- Unknown values are not zero. Missing limits, partial errors, stale data and over-100% usage remain distinguishable. Cards use consistent 12pt internal padding; additional providers scroll horizontally rather than disappear.
-
-A summary is the **maximum single observed utilization**, not an account total or an assertion that the displayed account is active/exhausted. Details retain all account/limit IDs, balances, resets and notes. A configured metric is matched by exact account/limit identity; another limit's reset is never borrowed.
-
-**Quit** does not immediately restart the app. To reopen it or apply configuration edits:
+**Quit** does not immediately restart the app. To reopen it or apply config edits:
 
 ```sh
 launchctl kickstart -k "gui/$(id -u)/com.dhkim.omp-usage-panel"
 ```
 
-### Configuration
+## Configuration
 
-Use **Open config** to edit `config.json`, then restart the app. Do not put API keys in it.
+Edit `~/Library/Application Support/omp-usage-panel/config.json` with **Open config**, then restart the app. Do not put API keys in it.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `nodePath` | Installed Node | Absolute executable path outside the checkout |
-| `ompPath` | Discovered omp | Absolute executable path outside the checkout |
-| `profile` | `default` | omp profile holding authentication |
-| `refreshSeconds` | `60` | Collector invocation interval |
-| `cacheMinutes` | `5` | Actual usage-query cache lifetime; `0` queries each time |
-| `timeoutSeconds` | `25` | omp subprocess deadline |
-| `providers` | `null` | All available providers; an array selects display/order |
+| `refreshSeconds` | `60` | Collector interval |
+| `cacheMinutes` | `5` | Usage cache lifetime; `0` queries every time |
+| `timeoutSeconds` | `25` | omp subprocess timeout |
+| `providers` | `null` | `null` shows all; an array selects and orders them |
 | `labels` | `{}` | Provider ID → display name |
-| `metrics` | `{}` | Provider ID → exact representative limit ID |
-| `warnPercent` | `70` | Warning threshold |
-| `criticalPercent` | `90` | Critical threshold |
-| `showPace` | `true` | Show elapsed-period marker and percentage |
+| `metrics` | `{}` | Provider ID → limit ID shown as its representative metric |
+| `warnPercent` / `criticalPercent` | `70` / `90` | Thresholds |
+| `showPace` | `true` | Show the elapsed-period marker |
 
-Find limit IDs in `snapshot.accounts[].limits[].id` from the JSON collector below. Mistral API and Vibe budgets are distinct pools; choosing the displayed metric does not change omp's account selection.
+`nodePath` and `ompPath` must be absolute. `profile` (default `default`) names the omp profile that holds authentication. Metric limit IDs are at `snapshot.accounts[].limits[].id` in collector output. Choosing a metric changes only the display, not omp's account selection.
 
-## Collector / integrations
+## Collector
 
 ```sh
-node packages/usage-core/cli.mjs
-node packages/usage-core/cli.mjs --refresh
+node packages/usage-core/cli.mjs            # JSON: snapshot, source, optional error
+node packages/usage-core/cli.mjs --refresh  # runs `omp usage invalidate` first
 ```
 
-Output contains `snapshot` and `source` (`live`, `cache`, `stale`, `unavailable`). See [the schema](packages/usage-core/types.ts). `npm run usage:collect` is the interactive equivalent; call Node directly when another program needs JSON without npm banners.
-
-Collection uses Node built-ins and the local omp credential store. Cache identity includes the executable, profile and authentication-store path. Failed refreshes retain the last successful snapshot with stale/error information rather than inventing zero usage. Cache files can contain account identifiers: do not commit them.
-
-Manual Refresh also runs the supported `omp usage invalidate` command before the JSON query so omp's own usage cache cannot mask the refresh. It does not change credentials or provider-plugin installation.
-
-Override the cache root with `OMP_USAGE_CACHE_DIR`.
+`source` is `live`, `cache`, `stale`, or `unavailable`. Schema: [types.ts](packages/usage-core/types.ts). A failed refresh keeps the last good snapshot, marked `stale`; zero usage is never invented. Cache files can contain account identifiers, so do not commit them. Cache root: `OMP_USAGE_CACHE_DIR`.
 
 ## Uninstall
 
@@ -104,12 +66,11 @@ npm run macos:uninstall -- --dry-run
 npm run macos:uninstall
 ```
 
-Only the owned app and LaunchAgent are removed. Configuration, caches, historical records and provider installations are preserved. Modified/foreign files are not deleted.
+Only the owned app and LaunchAgent (`~/Library/LaunchAgents/com.dhkim.omp-usage-panel.plist`) are removed. Configuration, caches, records and provider installations are kept. Modified or foreign files are not deleted.
 
-Without the checkout, use the installed management code:
+Without the checkout:
 
 ```sh
-node "$HOME/Applications/OMP Usage.app/Contents/Resources/runtime/apps/macos/uninstall.mjs" --dry-run
 node "$HOME/Applications/OMP Usage.app/Contents/Resources/runtime/apps/macos/uninstall.mjs"
 ```
 
@@ -117,11 +78,9 @@ node "$HOME/Applications/OMP Usage.app/Contents/Resources/runtime/apps/macos/uni
 
 ```sh
 npm ci
-npm run verify
-npm run macos:build
+npm run verify       # type check and tests; Swift checks run on macOS
+npm run macos:build  # writes build/OMP Usage.app
 ```
-
-`verify` runs checked JavaScript/TypeScript and Node behavioral tests. On macOS it also compiles/runs Swift model, layout, identity-matching and transition checks. CI verifies on macOS and compiles the complete AppKit app. No live credentials or provider requests are needed by the tests.
 
 ## License
 
