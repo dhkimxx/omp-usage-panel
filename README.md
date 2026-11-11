@@ -1,4 +1,4 @@
-# omp-usage-dashboard
+# omp-usage-panel
 
 Standalone usage dashboard for [omp](https://github.com/can1357/oh-my-pi): a native macOS AppKit app on a shared Node.js collector. No interactive omp session required.
 
@@ -9,8 +9,8 @@ It shows whichever providers and accounts your installed omp supports. Installin
 Requires macOS 13+, Node.js **22.18+**, and an authenticated omp that supports `omp usage --json`. Building also needs Xcode Command Line Tools (`swiftc`, `codesign`). Tested with omp 18.18.6.
 
 ```sh
-git clone https://github.com/dhkimxx/omp-usage-dashboard.git
-cd omp-usage-dashboard
+git clone https://github.com/dhkimxx/omp-usage-panel.git
+cd omp-usage-panel
 npm ci
 npm run macos:install -- --dry-run   # preview
 npm run macos:install
