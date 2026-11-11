@@ -1,6 +1,6 @@
 # omp-usage-panel
 
-Standalone usage dashboard for [omp](https://github.com/can1357/oh-my-pi): a native macOS AppKit app on a shared Node.js collector. No interactive omp session required.
+Standalone usage panel for [omp](https://github.com/can1357/oh-my-pi): a native macOS AppKit app on a shared Node.js collector. No interactive omp session required.
 
 It shows whichever providers and accounts your installed omp supports. Installing or removing it does not install, retarget, or remove provider plugins.
 
