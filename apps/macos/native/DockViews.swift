@@ -1,6 +1,6 @@
 import AppKit
 
-private enum DockPalette {
+enum DockPalette {
     static let primaryText = NSColor(calibratedWhite: 0.94, alpha: 1)
     static let secondary = NSColor(calibratedWhite: 0.64, alpha: 1)
     static let muted = NSColor(calibratedWhite: 0.48, alpha: 1)
@@ -29,7 +29,8 @@ private enum DockPalette {
 }
 
 final class DockRootView: NSView {
-    var hoverChanged: ((Bool) -> Void)?
+    // Pointer entry/exit only asks the controller to reconcile with the shared hover policy.
+    var hoverChanged: (() -> Void)?
     var contextMenu: (() -> NSMenu)?
     var openOverview: (() -> Void)?
     var mode: DockPlacementMode = .floating { didSet { needsDisplay = true } }
@@ -53,8 +54,8 @@ final class DockRootView: NSView {
         draggingPanel = false
     }
 
-    override func mouseEntered(with event: NSEvent) { hoverChanged?(true) }
-    override func mouseExited(with event: NSEvent) { hoverChanged?(false) }
+    override func mouseEntered(with event: NSEvent) { hoverChanged?() }
+    override func mouseExited(with event: NSEvent) { hoverChanged?() }
 
     override func draw(_ dirtyRect: NSRect) {
         let body = bodyRect.intersection(bounds)
@@ -63,7 +64,10 @@ final class DockRootView: NSView {
         let path: NSBezierPath
         if mode == .notchConnected {
             let footerHeight = cameraRect.isEmpty ? body.height : max(0, cameraRect.minY - body.minY)
-            let radius = min(9 + 13 * amount, min(body.width / 2, max(footerHeight, 22 * amount)))
+            // Both exposed lower corners share one radius: 14pt on the 28pt compact wing, relaxing
+            // to the 22pt board contour as it expands. The top edge stays flush with the screen.
+            let compactCap = body.height / 2 * (1 - amount)
+            let radius = min(14 + 8 * amount, body.width / 2, max(footerHeight, 22 * amount, compactCap))
             let leftShoulder = min(max(0, body.minX - bounds.minX), max(0, body.height - radius))
             let rightShoulder = min(max(0, bounds.maxX - body.maxX), max(0, body.height - radius))
             let top = bounds.maxY
@@ -88,7 +92,8 @@ final class DockRootView: NSView {
                        controlPoint2: NSPoint(x: body.minX, y: top))
             path.close()
         } else {
-            let radius = min(9 + 13 * amount, min(body.width, body.height) / 2)
+            // The compact capsule is 28pt high; expansion relaxes it into the board radius.
+            let radius = min(14 + 8 * amount, min(body.width, body.height) / 2)
             path = NSBezierPath(roundedRect: body, xRadius: radius, yRadius: radius)
         }
         NSColor.black.setFill()
@@ -116,7 +121,7 @@ final class DockRootView: NSView {
 
 class DockButton: NSButton {
     var contextMenu: (() -> NSMenu)?
-    fileprivate private(set) var isHovered = false
+    private(set) var isHovered = false
     private var tracking: NSTrackingArea?
     private var draggingPanel = false
     private var windowObservers: [NSObjectProtocol] = []
@@ -219,7 +224,7 @@ class DockButton: NSButton {
         return resigned
     }
 
-    fileprivate func drawKeyboardFocus(radius: CGFloat) {
+    func drawKeyboardFocus(radius: CGFloat) {
         guard window?.firstResponder === self else { return }
         NSColor.keyboardFocusIndicatorColor.setStroke()
         let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5),
@@ -234,75 +239,197 @@ class DockButton: NSButton {
     }
 }
 
-final class CompactProviderButton: DockButton {
-    private var percent: Double?
-    private var color = DockPalette.muted
-    private var hasIssue = false
+// Shared mark-only 22pt circle chrome: hover/press wash, keyboard focus and badges. Hit
+// frames are taller than the circle (28pt row); hover only washes the circle, it never
+// moves or resizes the control.
+class CompactCircleButton: DockButton {
+    private static let overLimitMark = DockPalette.text("!", size: 6.5, weight: .heavy,
+                                                        color: .white, alignment: .center)
 
-    func update(card: DashboardCard) {
-        title = card.label
-        percent = card.percent
-        color = DockPalette.usage(card.severity)
-        hasIssue = card.hasIssue
-        toolTip = card.tooltip
-        setAccessibilityLabel("\(card.label), \(card.value)\(card.hasIssue ? ", attention required" : "")")
-        setAccessibilityHelp(card.tooltip)
+    var circle: NSRect {
+        let diameter = CompactMetrics.ringDiameter
+        return NSRect(x: bounds.midX - diameter / 2, y: bounds.midY - diameter / 2,
+                      width: diameter, height: diameter)
+    }
+
+    var emphasis: CGFloat { isHighlighted ? 0.28 : (isHovered ? 0.16 : 0) }
+
+    func drawWash() {
+        guard emphasis > 0 else { return }
+        NSColor.white.withAlphaComponent(emphasis * 0.6).setFill()
+        NSBezierPath(ovalIn: circle).fill()
+    }
+
+    func drawWarningDot() {
+        let rect = NSRect(x: bounds.midX + CompactMetrics.ringDiameter / 2 - 6, y: circle.minY, width: 6, height: 6)
+        NSColor.black.setFill()
+        NSBezierPath(ovalIn: rect.insetBy(dx: -1, dy: -1)).fill()
+        NSColor.systemOrange.setFill()
+        NSBezierPath(ovalIn: rect).fill()
+    }
+
+    // A real over-limit cue, distinct from the warning dot: stale/transport/provider warnings
+    // are never presented as quota overage.
+    func drawOverLimitBadge() {
+        let rect = NSRect(x: bounds.midX + CompactMetrics.ringDiameter / 2 - 8, y: circle.maxY - 8, width: 8, height: 8)
+        NSColor.black.setFill()
+        NSBezierPath(ovalIn: rect.insetBy(dx: -1, dy: -1)).fill()
+        NSColor.systemRed.setFill()
+        NSBezierPath(ovalIn: rect).fill()
+        let mark = Self.overLimitMark
+        let size = mark.size()
+        mark.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
+    }
+
+    func drawCenteredText(_ text: NSAttributedString) {
+        let size = text.size()
+        text.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2))
+    }
+
+    func drawFocusOutline() {
+        guard window?.firstResponder === self else { return }
+        NSColor.keyboardFocusIndicatorColor.setStroke()
+        let ring = NSBezierPath(ovalIn: circle.insetBy(dx: 0.75, dy: 0.75))
+        ring.lineWidth = 1.5
+        ring.stroke()
+    }
+
+    func dashedCircle(in rect: NSRect, width: CGFloat) -> NSBezierPath {
+        let path = NSBezierPath(ovalIn: rect)
+        path.lineWidth = width
+        let dash = CGFloat.pi * rect.width / 28
+        path.setLineDash([dash, dash], count: 2, phase: 0)
+        return path
+    }
+
+    override var focusRingMaskBounds: NSRect { circle }
+    override func drawFocusRingMask() { NSBezierPath(ovalIn: circle).fill() }
+}
+
+final class CompactRingButton: CompactCircleButton {
+    private(set) var presentation: CompactRingPresentation?
+    private var markText = NSAttributedString(string: "")
+
+    // Presentation, tooltip, accessibility and the mark are cached when the content
+    // changes; painting (including hover/animation repaint) only reads the cache.
+    func update(_ presentation: CompactRingPresentation) {
+        guard presentation != self.presentation else { return }
+        self.presentation = presentation
+        identifier = NSUserInterfaceItemIdentifier(presentation.provider)
+        title = presentation.label
+        toolTip = presentation.tooltip
+        setAccessibilityLabel(presentation.accessibilityLabel)
+        setAccessibilityHelp(presentation.tooltip)
+        markText = DockPalette.text(presentation.mark, size: CompactMetrics.markFontSize, weight: .semibold,
+                                    color: presentation.arc == .unknown ? DockPalette.secondary : DockPalette.primaryText,
+                                    alignment: .center)
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let track = NSRect(x: 0, y: (bounds.height - 2.5) / 2, width: max(0, bounds.width), height: 2.5)
-        let emphasis: CGFloat = isHighlighted ? 0.28 : (isHovered ? 0.16 : 0)
-        let trackColor = emphasis > 0
-            ? DockPalette.track.blended(withFraction: emphasis, of: .white) ?? DockPalette.track
-            : DockPalette.track
-        trackColor.setFill()
-        NSBezierPath(roundedRect: track, xRadius: 1.25, yRadius: 1.25).fill()
-        if let percent, percent.isFinite {
-            let fill = NSRect(x: track.minX, y: track.minY,
-                              width: track.width * min(1, max(0, percent / 100)), height: track.height)
-            let fillColor = emphasis > 0 ? color.blended(withFraction: emphasis, of: .white) ?? color : color
-            fillColor.setFill()
-            NSBezierPath(roundedRect: fill, xRadius: 1.25, yRadius: 1.25).fill()
-        } else {
-            DockPalette.secondary.setFill()
-            NSRect(x: track.midX - min(0.75, track.width / 2), y: track.minY,
-                   width: min(1.5, track.width), height: track.height).fill()
+        guard let presentation else { return }
+        drawWash()
+        let stroke = CompactMetrics.ringStroke
+        let rect = circle.insetBy(dx: stroke / 2, dy: stroke / 2)
+        switch presentation.arc {
+        case .unknown:
+            // Unknown is a static dashed ring, never an empty (0%) gauge.
+            (presentation.isReported ? DockPalette.secondary : DockPalette.muted).setStroke()
+            dashedCircle(in: rect, width: stroke).stroke()
+        case .fraction(let fraction):
+            let track = NSBezierPath(ovalIn: rect)
+            track.lineWidth = stroke
+            (emphasis > 0 ? DockPalette.track.blended(withFraction: emphasis, of: .white) ?? DockPalette.track
+                          : DockPalette.track).setStroke()
+            track.stroke()
+            let base = DockPalette.usage(presentation.severity)
+            (emphasis > 0 ? base.blended(withFraction: emphasis, of: .white) ?? base : base).setStroke()
+            if fraction >= 1 {
+                let full = NSBezierPath(ovalIn: rect)
+                full.lineWidth = stroke
+                full.stroke()
+            } else if fraction > 0 {
+                // Known zero draws only the track: no round-cap dot.
+                // Start at 12 o'clock and sweep clockwise as the eye sees it. AppKit measures angles in
+                // view coordinates, so a flipped view mirrors both the start angle and the direction.
+                let start: CGFloat = isFlipped ? -90 : 90
+                let sweep = 360 * CGFloat(fraction) * (isFlipped ? 1 : -1)
+                let arc = NSBezierPath()
+                arc.appendArc(withCenter: NSPoint(x: rect.midX, y: rect.midY), radius: rect.width / 2,
+                              startAngle: start, endAngle: start + sweep, clockwise: !isFlipped)
+                arc.lineWidth = stroke
+                arc.lineCapStyle = .round
+                arc.stroke()
+            }
         }
-        if hasIssue {
-            NSColor.systemOrange.setFill()
-            let diameter = min(2, bounds.width)
-            NSBezierPath(ovalIn: NSRect(x: bounds.maxX - diameter, y: bounds.maxY - 3,
-                                      width: diameter, height: 2)).fill()
-        }
-        drawKeyboardFocus(radius: 3)
+        drawCenteredText(markText)
+        if presentation.isOverLimit { drawOverLimitBadge() }
+        if presentation.hasWarning { drawWarningDot() }
+        drawFocusOutline()
     }
 }
 
-final class CompactStatusButton: DockButton {
-    private var hasIssue = false
-    private var collecting = false
+// Circular +N count of providers that do not fit. It is a count, not a usage gauge.
+final class CompactMoreButton: CompactCircleButton {
+    private var presentation: CompactMorePresentation?
+    private var countText = NSAttributedString(string: "")
 
-    func update(issue: String, collecting: Bool) {
-        let issue = issue.trimmingCharacters(in: .whitespacesAndNewlines)
-        hasIssue = !issue.isEmpty
-        self.collecting = collecting
-        let status = collecting ? "Collecting usage…" : "No usage data available"
-        let description = issue.isEmpty ? status : "\(status) · \(issue)"
-        title = "Usage overview"
-        toolTip = description
-        setAccessibilityLabel("Usage overview, \(description)")
-        setAccessibilityHelp(description)
+    func update(_ presentation: CompactMorePresentation) {
+        guard presentation != self.presentation else { return }
+        self.presentation = presentation
+        title = "More providers"
+        toolTip = presentation.tooltip
+        setAccessibilityLabel(presentation.accessibilityLabel)
+        setAccessibilityHelp(presentation.tooltip)
+        countText = DockPalette.text(presentation.text, size: CompactMetrics.markFontSize, weight: .semibold,
+                                     color: DockPalette.primaryText, monospaced: true, alignment: .center)
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let diameter = min(3, min(bounds.width, bounds.height))
-        let color = hasIssue ? NSColor.systemOrange : (collecting ? DockPalette.secondary : DockPalette.muted)
-        (isHovered || isHighlighted ? color.blended(withFraction: 0.2, of: .white) ?? color : color).setFill()
-        NSBezierPath(ovalIn: NSRect(x: bounds.midX - diameter / 2, y: bounds.midY - diameter / 2,
-                                  width: diameter, height: diameter)).fill()
-        drawKeyboardFocus(radius: 3)
+        guard let presentation else { return }
+        drawWash()
+        NSColor(calibratedWhite: 1, alpha: 0.08).setFill()
+        NSBezierPath(ovalIn: circle).fill()
+        let outline = NSBezierPath(ovalIn: circle.insetBy(dx: CompactMetrics.ringStroke / 2, dy: CompactMetrics.ringStroke / 2))
+        outline.lineWidth = CompactMetrics.ringStroke
+        DockPalette.secondary.setStroke()
+        outline.stroke()
+        drawCenteredText(countText)
+        if presentation.hasWarning { drawWarningDot() }
+        drawFocusOutline()
+    }
+}
+
+// The "+" shown when nothing is selected or there is no data to select from. It opens the real settings.
+final class CompactConfigureButton: CompactCircleButton {
+    private var presentation: CompactConfigurePresentation?
+
+    func update(_ presentation: CompactConfigurePresentation) {
+        guard presentation != self.presentation else { return }
+        self.presentation = presentation
+        title = "Compact display settings"
+        toolTip = presentation.tooltip
+        setAccessibilityLabel(presentation.accessibilityLabel)
+        setAccessibilityHelp(presentation.tooltip)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let presentation else { return }
+        drawWash()
+        let stroke = CompactMetrics.ringStroke
+        DockPalette.muted.setStroke()
+        dashedCircle(in: circle.insetBy(dx: stroke / 2, dy: stroke / 2), width: stroke).stroke()
+        let plus = NSBezierPath()
+        plus.lineWidth = 1.5
+        plus.lineCapStyle = .round
+        plus.move(to: NSPoint(x: bounds.midX - 4, y: bounds.midY)); plus.line(to: NSPoint(x: bounds.midX + 4, y: bounds.midY))
+        plus.move(to: NSPoint(x: bounds.midX, y: bounds.midY - 4)); plus.line(to: NSPoint(x: bounds.midX, y: bounds.midY + 4))
+        DockPalette.secondary.setStroke()
+        plus.stroke()
+        if presentation.hasIssue { drawWarningDot() }
+        drawFocusOutline()
     }
 }
 
@@ -322,17 +449,71 @@ private final class DashboardLabel: NSTextField {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-private final class DashboardHeaderButton: DockButton {
-    private let text: NSAttributedString
-    private let symbol: NSImage?
-    var symbolOnly: Bool { didSet { if symbolOnly != oldValue { needsDisplay = true } } }
+// One measurement policy for every action control (overview/detail toolbars, scope tabs, account picker).
+// Frames and camera-clearance budgets use these numbers, so drawing can never disagree with layout.
+enum ActionMetrics {
+    static let height: CGFloat = 28
+    static let iconOnlyWidth: CGFloat = 28
+    static let inset: CGFloat = 9
+    static let iconSize: CGFloat = 13
+    static let iconGap: CGFloat = 6
+    static let chevronSize: CGFloat = 9
+    static let chevronGap: CGFloat = 6
+    static let groupGap: CGFloat = 6
+    static let fontSize: CGFloat = 12
+    static let radius: CGFloat = 8
+    // Distance between an icon-only control's edge and its glyph.
+    static var glyphBleed: CGFloat { (iconOnlyWidth - iconSize) / 2 }
+
+    private static var widths: [String: CGFloat] = [:]
+    // Measured with the heaviest weight so selection never changes a control's width. Cached per title.
+    static func textWidth(_ title: String) -> CGFloat {
+        if let cached = widths[title] { return cached }
+        let width = ceil(DockPalette.text(title, size: fontSize, weight: .semibold).size().width)
+        widths[title] = width
+        return width
+    }
+    static func width(title: String, icon: Bool, chevron: Bool = false, centered: Bool = false) -> CGFloat {
+        let reserve = chevronGap + chevronSize
+        return inset + (centered && chevron ? reserve : 0) + (icon ? iconSize + iconGap : 0) + textWidth(title)
+            + (chevron ? reserve : 0) + inset
+    }
+}
+
+class ActionButton: DockButton {
+    enum Style {
+        // Persistent rounded fill (overview toolbar, account picker).
+        case filled
+        // Fill only for hover, press and selection (detail toolbar, scope tabs).
+        case quiet
+    }
+
+    var style: Style = .quiet { didSet { if style != oldValue { needsDisplay = true } } }
+    var selected = false { didSet { if selected != oldValue { needsDisplay = true } } }
+    var showsTitle = true { didSet { if showsTitle != oldValue { needsDisplay = true } } }
+    // Picker affordance. A disabled chevron button reads as a plain label instead of a dead control.
+    var trailingChevron = false { didSet { if trailingChevron != oldValue { needsDisplay = true } } }
+    // Opt-in: center the icon and title group instead of left-aligning it (provider dropdown only).
+    var centersContent = false { didSet { if centersContent != oldValue { needsDisplay = true } } }
+    private let symbolName: String?
+    // Content (title, symbol, tone) changes rarely; draw only reads these caches.
+    private enum Tone: Int { case normal, selected, disabled, label }
+    private var icons = [NSImage?](repeating: nil, count: 4)
+    private var chevrons = [NSImage?](repeating: nil, count: 4)
+    private var labels = [(text: NSAttributedString, width: CGFloat, height: CGFloat)?](repeating: nil, count: 4)
+    private static let fillBase = NSColor(calibratedWhite: 0.075, alpha: 1)
+    private static let fillQuietHover = NSColor(calibratedWhite: 0.10, alpha: 1)
+    private static let fillFilledHover = NSColor(calibratedWhite: 0.13, alpha: 1)
+    private static let fillSelected = NSColor(calibratedWhite: 0.16, alpha: 1)
+    private static let fillPressed = NSColor(calibratedWhite: 0.18, alpha: 1)
+    private static let fillSelectedHover = NSColor(calibratedWhite: 0.19, alpha: 1)
+    override var title: String { didSet { labels = [(text: NSAttributedString, width: CGFloat, height: CGFloat)?](repeating: nil, count: 4) } }
     override var isFlipped: Bool { true }
 
-    init(title: String, symbol: String, symbolOnly: Bool = false) {
-        self.text = DockPalette.text(title, size: 11, weight: .medium, color: DockPalette.secondary)
-        self.symbol = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [DockPalette.secondary]))
-        self.symbolOnly = symbolOnly
+    init(title: String, symbol: String? = nil, style: Style = .quiet, showsTitle: Bool = true) {
+        symbolName = symbol
+        self.style = style
+        self.showsTitle = showsTitle
         super.init(frame: .zero)
         self.title = title
         setAccessibilityLabel(title)
@@ -341,27 +522,144 @@ private final class DashboardHeaderButton: DockButton {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
 
+    private func color(for tone: Tone) -> NSColor {
+        switch tone {
+        case .normal: return DockPalette.secondary
+        case .selected, .label: return DockPalette.primaryText
+        case .disabled: return DockPalette.muted
+        }
+    }
+
+    private func symbol(_ name: String, point: CGFloat, weight: NSFont.Weight, tone: Tone,
+                        cache: inout [NSImage?]) -> NSImage? {
+        if let cached = cache[tone.rawValue] { return cached }
+        let configuration = NSImage.SymbolConfiguration(pointSize: point, weight: weight)
+            .applying(.init(paletteColors: [color(for: tone)]))
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(configuration)
+        cache[tone.rawValue] = image
+        return image
+    }
+
+    // Aspect-fits a symbol inside a square box centered on `center`, so glyph centers never depend on advance widths.
+    private func drawSymbol(_ image: NSImage?, box: CGFloat, center: NSPoint) {
+        guard let image, image.size.width > 0, image.size.height > 0 else { return }
+        let scale = min(box / image.size.width, box / image.size.height)
+        let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+        image.draw(in: NSRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
+                              width: size.width, height: size.height),
+                   from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7)
-        NSColor(calibratedWhite: isHighlighted ? 0.18 : (isHovered ? 0.13 : 0.075), alpha: 1).setFill()
-        shape.fill()
-        NSGraphicsContext.saveGraphicsState()
-        if !isEnabled { NSGraphicsContext.current?.cgContext.setAlpha(0.45) }
-        let iconRect = NSRect(x: symbolOnly ? (bounds.width - 13) / 2 : 9,
-                              y: (bounds.height - 13) / 2, width: 13, height: 13)
-        if let symbol, symbol.size.width > 0, symbol.size.height > 0 {
-            let scale = min(iconRect.width / symbol.size.width, iconRect.height / symbol.size.height)
-            let size = NSSize(width: symbol.size.width * scale, height: symbol.size.height * scale)
-            let fitted = NSRect(x: iconRect.midX - size.width / 2, y: iconRect.midY - size.height / 2,
-                                width: size.width, height: size.height)
-            symbol.draw(in: fitted, from: .zero, operation: .sourceOver, fraction: 0.8,
-                        respectFlipped: true, hints: nil)
+        let label = !isEnabled && trailingChevron
+        let fill: NSColor?
+        if isHighlighted && isEnabled { fill = Self.fillPressed }
+        else if selected { fill = isHovered ? Self.fillSelectedHover : Self.fillSelected }
+        else if isHovered && isEnabled { fill = style == .filled ? Self.fillFilledHover : Self.fillQuietHover }
+        else if style == .filled && !label { fill = Self.fillBase }
+        else { fill = nil }
+        if let fill {
+            fill.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: ActionMetrics.radius,
+                         yRadius: ActionMetrics.radius).fill()
         }
-        if !symbolOnly {
-            text.draw(in: NSRect(x: 28, y: (bounds.height - 14) / 2, width: max(0, bounds.width - 33), height: 14))
+        let tone: Tone = label ? .label : !isEnabled ? .disabled : (selected ? .selected : .normal)
+        let titleVisible = showsTitle && !title.isEmpty
+        let midY = (bounds.height / 2).rounded(.toNearestOrAwayFromZero)
+        var x = ActionMetrics.inset
+        let reserve = trailingChevron ? ActionMetrics.chevronGap + ActionMetrics.chevronSize : 0
+        var entry: (text: NSAttributedString, width: CGFloat, height: CGFloat)?
+        if titleVisible {
+            if let cached = labels[tone.rawValue] { entry = cached } else {
+                let text = DockPalette.text(title, size: ActionMetrics.fontSize,
+                                            weight: tone == .selected ? .semibold : .medium, color: color(for: tone))
+                let size = text.size()
+                let built = (text: text, width: ceil(size.width), height: ceil(size.height))
+                labels[tone.rawValue] = built
+                entry = built
+            }
         }
-        NSGraphicsContext.restoreGraphicsState()
-        drawKeyboardFocus(radius: 7)
+        // Centered mode centers the icon+gap+title group in the space left after reserving the chevron's width on
+        // both sides, so the group sits on the button's center while the chevron stays anchored at the edge.
+        let iconSpan = symbolName == nil ? 0 : ActionMetrics.iconSize + ActionMetrics.iconGap
+        var titleWidth = max(0, bounds.width - x - iconSpan - ActionMetrics.inset - reserve)
+        if centersContent, titleVisible, let entry {
+            let usable = max(0, bounds.width - (ActionMetrics.inset + reserve) * 2)
+            titleWidth = min(entry.width, max(0, usable - iconSpan))
+            x = ActionMetrics.inset + reserve + (usable - iconSpan - titleWidth) / 2
+        }
+        if let symbolName {
+            if !titleVisible { x = (bounds.width - ActionMetrics.iconSize) / 2 }
+            drawSymbol(symbol(symbolName, point: ActionMetrics.fontSize, weight: .medium, tone: tone, cache: &icons),
+                       box: ActionMetrics.iconSize,
+                       center: NSPoint(x: x + ActionMetrics.iconSize / 2, y: midY))
+            x += ActionMetrics.iconSize + ActionMetrics.iconGap
+        }
+        if let entry {
+            entry.text.draw(in: NSRect(x: x, y: midY - entry.height / 2, width: titleWidth, height: entry.height))
+        }
+        if trailingChevron && !label {
+            drawSymbol(symbol("chevron.down", point: 9, weight: .semibold, tone: tone, cache: &chevrons),
+                       box: ActionMetrics.chevronSize,
+                       center: NSPoint(x: bounds.width - ActionMetrics.inset - ActionMetrics.chevronSize / 2, y: midY))
+        }
+        drawKeyboardFocus(radius: ActionMetrics.radius)
+    }
+}
+
+// The one provider dropdown shared by the overview and detail headers: typed All plus the complete catalog.
+// Titles are centered between symmetric chevron reservations; the chevron stays at the trailing edge.
+final class ProviderScopeButton: ActionButton {
+    var choose: ((DetailScope) -> Void)?
+    var menuTrackingChanged: ((Bool) -> Void)?
+    private var providers: [DetailProvider] = []
+    private var selectedScope: DetailScope?
+
+    init(style: Style) {
+        super.init(title: "Providers", style: style)
+        trailingChevron = true
+        centersContent = true
+        target = self
+        action = #selector(pressed)
+        setAccessibilityLabel("Provider filter")
+        setAccessibilityHelp("Choose All or one provider")
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+
+    /// `selected == nil` is the overview: no scope is chosen and the control reads "Providers".
+    func update(providers: [DetailProvider], selected: DetailScope?) {
+        self.providers = providers
+        selectedScope = selected
+        let current = selected.flatMap { scope in providers.first(where: { $0.scope == scope })?.label } ?? "Providers"
+        if title != current { title = current }
+        toolTip = current
+        setAccessibilityValue(current)
+    }
+
+    /// Width for the full title plus symmetric chevron reservations, clamped to `maximum`.
+    func preferredWidth(maximum: CGFloat) -> CGFloat {
+        min(maximum, ActionMetrics.width(title: title, icon: false, chevron: true, centered: true))
+    }
+
+    @objc private func pressed() {
+        let menu = NSMenu(title: "Provider filter")
+        for provider in providers {
+            let item = NSMenuItem(title: provider.label, action: #selector(chosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = provider.scope
+            item.state = provider.scope == selectedScope ? .on : .off
+            menu.addItem(item)
+        }
+        menuTrackingChanged?(true)
+        defer { menuTrackingChanged?(false) }
+        // Buttons are flipped: the menu's top-left corner sits just below the control.
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.maxY + 4), in: self)
+    }
+
+    @objc private func chosen(_ item: NSMenuItem) {
+        guard let scope = item.representedObject as? DetailScope else { return }
+        choose?(scope)
     }
 }
 
@@ -378,6 +676,7 @@ private final class DashboardCardButton: DockButton {
     private var elapsed: Double?
     private var color = DockPalette.muted
     override var isFlipped: Bool { true }
+    private static let warningReserve: CGFloat = 9
 
     func update(card: DashboardCard, now: Date) {
         self.card = card
@@ -386,7 +685,7 @@ private final class DashboardCardButton: DockButton {
         setAccessibilityLabel("\(card.label), \(card.value), \(card.metric), \(card.context)\(card.hasIssue ? ", attention required" : "")")
         setAccessibilityHelp(card.tooltip)
         color = DockPalette.usage(card.severity)
-        providerText = DockPalette.text(card.label, size: 12.5, weight: .semibold)
+        providerText = DockPalette.text(card.label, size: 12.5, weight: .semibold, alignment: .center)
         var valueSize: CGFloat = 30
         let available = DashboardSizing.cardWidth - DashboardSizing.cardPadding * 2
         while valueSize > 15,
@@ -438,7 +737,9 @@ private final class DashboardCardButton: DockButton {
         shape.stroke()
         let padding = DashboardSizing.cardPadding
         let width = max(0, bounds.width - padding * 2)
-        providerText.draw(in: NSRect(x: padding, y: padding, width: max(0, width - (card.hasIssue ? 9 : 0)), height: 18))
+        // The warning dot's slot is reserved on both sides in every state, so the centered title never shifts.
+        providerText.draw(in: NSRect(x: padding + Self.warningReserve, y: padding,
+                                     width: max(0, width - Self.warningReserve * 2), height: 18))
         if card.hasIssue {
             NSColor.systemOrange.setFill()
             NSBezierPath(ovalIn: NSRect(x: bounds.width - padding - 4, y: padding + 5, width: 4, height: 4)).fill()
@@ -501,7 +802,12 @@ private final class DashboardScrollView: NSScrollView {
 
 final class DashboardView: NSView {
     var selectProvider: ((String) -> Void)?
-    var openAccounts: (() -> Void)?
+    var selectScope: ((DetailScope) -> Void)? {
+        didSet { providerButton.choose = selectScope }
+    }
+    var menuTrackingChanged: ((Bool) -> Void)? {
+        didSet { providerButton.menuTrackingChanged = menuTrackingChanged }
+    }
     var refresh: (() -> Void)?
     var optionsMenu: (() -> NSMenu)?
     // This reservation is already converted from the root into flipped dashboard coordinates.
@@ -511,9 +817,9 @@ final class DashboardView: NSView {
     private let status = DashboardLabel()
     private let footer = DashboardLabel()
     private let legend = DashboardLabel()
-    private let accountsButton = DashboardHeaderButton(title: "Accounts", symbol: "person.crop.circle")
-    private let refreshButton = DashboardHeaderButton(title: "Refresh", symbol: "arrow.clockwise")
-    private let optionsButton = DashboardHeaderButton(title: "Options", symbol: "ellipsis", symbolOnly: true)
+    private let providerButton = ProviderScopeButton(style: .filled)
+    private let refreshButton = ActionButton(title: "Refresh", symbol: "arrow.clockwise", style: .filled)
+    private let optionsButton = ActionButton(title: "Options", symbol: "ellipsis", style: .filled, showsTitle: false)
     private let scrollView = DashboardScrollView()
     private let document = DashboardDocumentView()
     private var buttons: [String: DashboardCardButton] = [:]
@@ -529,17 +835,15 @@ final class DashboardView: NSView {
         legend.attributedStringValue = DockPalette.text("│ Elapsed", size: 10, color: DockPalette.secondary, alignment: .right)
         legend.toolTip = "The white marker shows how much of the selected usage window has elapsed."
         legend.setAccessibilityLabel("White marker: elapsed usage window")
-        let views: [NSView] = [heading, status, footer, legend, accountsButton, refreshButton, optionsButton, scrollView]
+        let views: [NSView] = [heading, status, footer, legend, providerButton, refreshButton, optionsButton, scrollView]
         for view in views {
             addSubview(view)
         }
-        accountsButton.target = self
-        accountsButton.action = #selector(accountsPressed)
         refreshButton.target = self
         refreshButton.action = #selector(refreshPressed)
         optionsButton.target = self
         optionsButton.action = #selector(optionsPressed)
-        for button in [accountsButton, refreshButton, optionsButton] {
+        for button in [providerButton, refreshButton, optionsButton] {
             button.contextMenu = { [weak self] in self?.optionsMenu?() ?? NSMenu() }
         }
         scrollView.drawsBackground = false
@@ -557,7 +861,8 @@ final class DashboardView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
 
-    func update(content: DashboardContent, collecting: Bool) {
+    func update(content: DashboardContent, collecting: Bool, providers: [DetailProvider]) {
+        providerButton.update(providers: providers, selected: nil)
         let issue = content.issue.trimmingCharacters(in: .whitespacesAndNewlines)
         let source = issue.isEmpty || content.status.contains(issue) ? content.status : "\(content.status) · \(issue)"
         status.attributedStringValue = DockPalette.text(source, size: 10,
@@ -598,7 +903,7 @@ final class DashboardView: NSView {
         showsLegend = content.cards.contains { $0.showPace && $0.elapsed(now: now) != nil }
         legend.isHidden = !showsLegend
         // Explicit key order follows the upstream provider order, including after reordering a snapshot.
-        var keyOrder: [NSView] = [accountsButton, refreshButton, optionsButton]
+        var keyOrder: [NSView] = [providerButton, refreshButton, optionsButton]
         keyOrder.append(contentsOf: ordered)
         for index in keyOrder.indices { keyOrder[index].nextKeyView = keyOrder[(index + 1) % keyOrder.count] }
         needsLayout = true
@@ -608,21 +913,38 @@ final class DashboardView: NSView {
         for button in orderedButtons { button.tick(now: now) }
     }
 
+    func focusSelection() {
+        let target: NSView = orderedButtons.first.map { $0 as NSView } ?? providerButton
+        window?.makeFirstResponder(target)
+    }
+
+    private static let headingWidth: CGFloat = 64
+    private static let narrowHeadingWidth: CGFloat = 32
+    // The dropdown keeps its full width (title + chevron); only the heading yields space.
+    private static let providersWidth = ActionMetrics.width(title: "Providers", icon: false, chevron: true, centered: true)
+    private static let refreshFullWidth = ActionMetrics.width(title: "Refresh", icon: true)
+    // Heading + providers, and Refresh + Options, at full width. Header reflow and layout share these budgets.
+    private static var fullLeftGroup: CGFloat { headingWidth + 7 + providersWidth }
+    private static var fullRightGroup: CGFloat {
+        refreshFullWidth + ActionMetrics.groupGap + ActionMetrics.iconOnlyWidth
+    }
+
     private static func needsHeaderReflow(for size: NSSize, cameraRect: NSRect) -> Bool {
         if cameraRect.isEmpty {
             // Switch both action groups together before their full-width frames can collide.
-            return size.width - DashboardSizing.padding * 2 < 281
+            return size.width - DashboardSizing.padding * 2 < fullLeftGroup + ActionMetrics.groupGap + fullRightGroup
         }
         let leftSpace = cameraRect.minX - 8 - (DashboardSizing.padding - 2)
         let rightSpace = size.width - DashboardSizing.padding - cameraRect.maxX - 8
-        return leftSpace < 67 || rightSpace < 64
+        return leftSpace < narrowHeadingWidth + ActionMetrics.groupGap + providersWidth
+            || rightSpace < ActionMetrics.iconOnlyWidth * 2 + ActionMetrics.groupGap
     }
 
     static func requiredHeaderHeight(for size: NSSize, cameraRect: NSRect) -> CGFloat {
         let cameraHeight = cameraRect.isEmpty ? 0 : max(0, cameraRect.maxY)
         let base = DashboardSizing.headerHeight(cameraHeight: cameraHeight)
         guard !cameraRect.isEmpty, needsHeaderReflow(for: size, cameraRect: cameraRect) else { return base }
-        return max(base, cameraHeight + 8 + 27)
+        return max(base, cameraHeight + 8 + ActionMetrics.height)
     }
 
     override func layout() {
@@ -630,22 +952,23 @@ final class DashboardView: NSView {
         let padding = DashboardSizing.padding
         let usable = max(0, bounds.width - padding * 2)
         let headerHeight = Self.requiredHeaderHeight(for: bounds.size, cameraRect: cameraRect)
-        let buttonY = headerHeight - 27
-        let leftSpace = cameraRect.isEmpty ? usable - 122 : cameraRect.minX - 8 - (padding - 2)
+        let buttonY = headerHeight - ActionMetrics.height
+        let leftSpace = cameraRect.isEmpty ? usable - Self.fullRightGroup - ActionMetrics.groupGap
+            : cameraRect.minX - 8 - (padding - 2)
         let rightSpace = cameraRect.isEmpty ? usable : bounds.width - padding - cameraRect.maxX - 8
         let reflow = Self.needsHeaderReflow(for: bounds.size, cameraRect: cameraRect)
-        let narrowAccounts = reflow || leftSpace < 159
-        let narrowRefresh = reflow || rightSpace < 116
-        accountsButton.symbolOnly = narrowAccounts
-        refreshButton.symbolOnly = narrowRefresh
-        let actionWidth: CGFloat = reflow ? min(29, max(0, (usable - 18) / 3)) : 29
-        let accountsWidth: CGFloat = narrowAccounts ? actionWidth : 88
-        let refreshWidth: CGFloat = narrowRefresh ? actionWidth : 81
+        let narrowProviders = reflow || leftSpace < Self.fullLeftGroup
+        let narrowRefresh = reflow || rightSpace < Self.fullRightGroup
+        refreshButton.showsTitle = !narrowRefresh
+        let iconWidth = ActionMetrics.iconOnlyWidth
+        let actionWidth: CGFloat = reflow ? min(iconWidth, max(0, (usable - 18) / 3)) : iconWidth
+        let providersWidth = Self.providersWidth
+        let refreshWidth: CGFloat = narrowRefresh ? actionWidth : Self.refreshFullWidth
         let headingWidth: CGFloat
         if reflow {
-            headingWidth = min(64, max(0, usable - actionWidth * 3 - 18))
+            headingWidth = min(64, max(0, usable - providersWidth - actionWidth * 2 - 18))
         } else {
-            headingWidth = narrowAccounts ? min(64, max(32, leftSpace - 35)) : 64
+            headingWidth = narrowProviders ? min(Self.headingWidth, max(Self.narrowHeadingWidth, leftSpace - providersWidth - 6)) : Self.headingWidth
         }
         let fontSize: CGFloat = headingWidth >= 48 ? 16 : 11
         if headingSize != fontSize {
@@ -654,12 +977,12 @@ final class DashboardView: NSView {
         }
         heading.frame = NSRect(x: padding - 2, y: headerHeight - (fontSize == 16 ? 25 : 22),
                                width: headingWidth, height: fontSize == 16 ? 23 : 17)
-        accountsButton.frame = NSRect(x: heading.frame.maxX + (narrowAccounts ? 6 : 7),
-                                      y: buttonY, width: accountsWidth, height: 27)
+        providerButton.frame = NSRect(x: heading.frame.maxX + (narrowProviders ? 6 : 7),
+                                      y: buttonY, width: providersWidth, height: ActionMetrics.height)
         optionsButton.frame = NSRect(x: bounds.width - padding - actionWidth, y: buttonY,
-                                     width: actionWidth, height: 27)
-        refreshButton.frame = NSRect(x: optionsButton.frame.minX - 6 - refreshWidth, y: buttonY,
-                                     width: refreshWidth, height: 27)
+                                     width: actionWidth, height: ActionMetrics.height)
+        refreshButton.frame = NSRect(x: optionsButton.frame.minX - ActionMetrics.groupGap - refreshWidth, y: buttonY,
+                                     width: refreshWidth, height: ActionMetrics.height)
         status.frame = NSRect(x: padding - 2, y: headerHeight + 3, width: usable + 4, height: 15)
         let rowY = headerHeight + 25
         scrollView.frame = NSRect(x: padding, y: rowY, width: usable, height: DashboardSizing.cardHeight + 3)
@@ -682,7 +1005,6 @@ final class DashboardView: NSView {
         return hit === self ? nil : hit
     }
 
-    @objc private func accountsPressed() { openAccounts?() }
     @objc private func refreshPressed() { refresh?() }
     @objc private func providerPressed(_ sender: DashboardCardButton) {
         if let provider = sender.card?.provider { selectProvider?(provider) }

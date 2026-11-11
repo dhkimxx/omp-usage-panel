@@ -4,6 +4,9 @@ import Foundation
     static func main() throws {
         runDockModelTests()
         runDashboardModelTests()
+        runCompactPreferencesTests()
+        try runPanelConfigStoreTests()
+        runGeneralSettingsDraftTests()
         let json = #"{"snapshot":{"version":1,"capturedAt":1000,"accounts":[{"id":"a","provider":"mistral","label":"Work","fetchedAt":1000,"notes":[],"limits":[{"id":"x","label":"Window","amount":{"unit":"requests","used":0,"limit":100},"window":{"id":"w","label":"Month","durationMs":10000,"resetsAt":20000,"estimated":true},"usedFraction":1.2,"notes":[]}]}],"unavailable":[]},"source":"live","summaries":[{"provider":"mistral","label":"Mistral","percent":120,"value":"120%","severity":"critical","accountCount":1,"accountId":"a","accountLabel":"Work","metricId":"x","metricLabel":"Window","windowLabel":"Month","notes":[]}]}"#
         let result = try JSONDecoder().decode(PanelResult.self, from: Data(json.utf8))
         let limit = result.snapshot!.accounts[0].limits[0]

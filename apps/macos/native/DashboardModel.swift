@@ -131,12 +131,6 @@ enum DashboardModel {
     }
 }
 
-struct CompactIndicatorMetrics {
-    let itemWidth: CGFloat
-    let spacing: CGFloat
-    let contentWidth: CGFloat
-}
-
 enum DashboardSizing {
     static let cardWidth: CGFloat = 128
     static let cardHeight: CGFloat = 148
@@ -153,17 +147,5 @@ enum DashboardSizing {
         let count = CGFloat(min(max(providerCount, 0), 5))
         return CGSize(width: max(360, padding * 2 + count * cardWidth + max(0, count - 1) * cardGap),
                       height: headerHeight(cameraHeight: cameraHeight) + cardHeight + 56)
-    }
-
-    static func compactIndicators(count: Int, stripWidth: CGFloat) -> CompactIndicatorMetrics {
-        guard count > 0, stripWidth.isFinite, stripWidth > 0 else {
-            return CompactIndicatorMetrics(itemWidth: 0, spacing: 0, contentWidth: 0)
-        }
-        let availableWidth = stripWidth - min(20, stripWidth * 0.2)
-        let count = CGFloat(count)
-        let budget = min(availableWidth, count * 18 + (count - 1) * 4)
-        let gap = min(4, budget / (count * 5))
-        return CompactIndicatorMetrics(itemWidth: (budget - gap * (count - 1)) / count,
-                                       spacing: gap, contentWidth: budget)
     }
 }

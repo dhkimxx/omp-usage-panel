@@ -22,27 +22,40 @@ The app is installed to `~/Applications/OMP Usage.app` with its own copy of the 
 
 ## Use
 
-- On a notched screen the panel sits around the camera. Otherwise it floats below the menu bar.
-- Hover to preview, click to pin. **Escape** or an outside click collapses it.
-- **Options** (or right-click): refresh, all accounts, open config/data folder, reset position, quit.
+- On a notched screen, compact provider rings sit beside the camera. Otherwise the panel floats below the menu bar.
+- Hover anywhere on the compact panel—including provider rings and floating mode—to preview the overview. Click a ring, or a provider card in the overview, for that provider's details. Use the overview header's **Providers** dropdown to choose **All** or one provider; the detail view has the same provider filter at the start of its account row, with **Overview** to go back. **More** opens the overview. **Escape** or an outside click collapses it.
+- **All** and the provider list come from the full collected catalog, including providers hidden from the summary cards or currently unavailable. The account picker remains available, and original limits and details are retained; these selections only change what is displayed and never change credentials.
+- **Options** (or right-click): Settings…, compact settings, refresh, open data folder, reset position, quit.
+- **Option-drag** to move the panel; **Reset position** restores automatic placement.
 - The summary is the highest single observed utilization, not an account total. Unknown values are not zero.
 
-**Quit** does not immediately restart the app. To reopen it or apply config edits:
+**Quit** does not immediately restart the app. To reopen it, or to apply manual edits made to `config.json` outside the app:
 
 ```sh
 launchctl kickstart -k "gui/$(id -u)/com.dhkim.omp-usage-panel"
 ```
 
+### Compact display
+
+Open **Options → Compact settings…** to choose providers, the left/right camera side and **Maximum slots** (default `3`).
+
+- Selection is independent of the slot cap. **More uses the last slot**: five selected providers with three slots show two rings and **+3**.
+- These choices affect only the compact display, not collection, authentication or the expanded dashboard.
+- Changes save automatically per configuration path and omp profile, and survive restarts/reinstallation. Clearing every provider leaves a **+** settings button.
+- Screen bounds may reduce the effective cap. App/status-menu occupancy is not detected; reduce the count or switch sides if menus overlap.
+
 ## Configuration
 
-Edit `~/Library/Application Support/omp-usage-panel/config.json` with **Open config**, then restart the app. Do not put API keys in it.
+Open **Options → Settings…** to edit the configuration in a native window with tabs for **Collection**, **Display**, **Providers**, **Labels**, **Metrics** and **Runtime**. **Save & Apply** validates and writes the file privately and atomically, then restarts collection in place—no app restart needed. **Cancel** or closing the window discards your edits. A profile change clears the previous profile's displayed data and uses that profile's compact preferences. API keys and authentication are not edited here; they stay managed by omp.
+
+**Compact settings…** is separate and still saves automatically. The file is `~/Library/Application Support/omp-usage-panel/config.json`; editing it by hand still needs the restart above. Do not put API keys in it.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `refreshSeconds` | `60` | Collector interval |
 | `cacheMinutes` | `5` | Usage cache lifetime; `0` queries every time |
 | `timeoutSeconds` | `25` | omp subprocess timeout |
-| `providers` | `null` | `null` shows all; an array selects and orders them |
+| `providers` | `null` | `null` shows all; an array selects and orders the summary cards only. Hidden providers stay reachable through **Providers → All**/provider |
 | `labels` | `{}` | Provider ID → display name |
 | `metrics` | `{}` | Provider ID → limit ID shown as its representative metric |
 | `warnPercent` / `criticalPercent` | `70` / `90` | Thresholds |

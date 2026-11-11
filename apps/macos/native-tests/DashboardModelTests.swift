@@ -102,23 +102,14 @@ func runDashboardModelTests() {
     precondition(DashboardSizing.headerHeight(cameraHeight: .nan).isFinite)
     precondition(DashboardSizing.headerHeight(cameraHeight: .infinity).isFinite)
 
-    let nominal = DashboardSizing.compactIndicators(count: 5, stripWidth: 160)
-    precondition(nominal.itemWidth == 18 && nominal.spacing == 4 && nominal.contentWidth == 106)
-    // Every configured provider gets a positive hairline, even beyond the card viewport.
-    for count in [1, 5, 6, 20, 120, Int.max] {
-        for width in [CGFloat(1), 16, 18, 80, 140, 2000] {
-            let metrics = DashboardSizing.compactIndicators(count: count, stripWidth: width)
-            let occupied = CGFloat(count) * metrics.itemWidth + CGFloat(count - 1) * metrics.spacing
-            precondition(metrics.itemWidth.isFinite && metrics.itemWidth > 0 && metrics.itemWidth <= 18)
-            precondition(metrics.spacing.isFinite && metrics.spacing >= 0 && metrics.spacing <= 4)
-            precondition(metrics.contentWidth.isFinite && metrics.contentWidth > 0 && metrics.contentWidth < width)
-            let centeredInset = (width - metrics.contentWidth) / 2
-            precondition(centeredInset > 0 && centeredInset + occupied < width)
-            precondition(abs(occupied - metrics.contentWidth) < 0.0000001)
-        }
-    }
-    for (count, width) in [(0, CGFloat(160)), (-1, 160), (5, 0), (5, -1), (5, .nan), (5, .infinity)] {
-        let metrics = DashboardSizing.compactIndicators(count: count, stripWidth: width)
-        precondition(metrics.itemWidth == 0 && metrics.spacing == 0 && metrics.contentWidth == 0)
-    }
+    // The compact selection is a separate view of the data: the complete content (all
+    // providers, exact values, over-limit percentages, tooltips) is unchanged by it.
+    let wide = content((0..<8).map { summary("provider\($0)", percent: $0 == 3 ? 104 : Double($0) * 10,
+                                              value: $0 == 3 ? "104%" : "\($0 * 10)%") })
+    let compactPlan = CompactSlotPlanner.plan(cards: wide.cards, selectedProviderIDs: wide.cards.map { $0.provider },
+                                              maximumVisibleSlots: 2, physicalCapacity: 100)
+    precondition(compactPlan.slots.count == 2 && compactPlan.hiddenProviderIDs.count == 7)
+    precondition(wide.cards.count == 8 && wide.footer.hasPrefix("8 providers"))
+    precondition(wide.cards[3].percent == 104 && wide.cards[3].tooltip.contains("104%"))
+    precondition(wide.cards.map { $0.provider } == (0..<8).map { "provider\($0)" })
 }

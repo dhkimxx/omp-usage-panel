@@ -10,10 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else if args.count == 3 && args[1] == "--config" { configPath = args[2] }
         else { fail("Usage: OMPUsagePanel [--config path]"); return }
         do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: configPath))
-            let config = try JSONDecoder().decode(PanelConfig.self, from: data)
-            guard config.version == 1, config.nodePath.hasPrefix("/"), config.refreshSeconds.isFinite, config.refreshSeconds > 0, config.timeoutSeconds.isFinite, config.timeoutSeconds > 0 else { throw CollectorError(message: "Invalid panel configuration") }
-            controller = PanelController(config: config, configPath: configPath); controller?.start()
+            let configStore = try PanelConfigStore(configPath: configPath)
+            controller = PanelController(configStore: configStore); controller?.start()
         } catch { fail("Cannot load panel configuration: \(error.localizedDescription)") }
     }
     func applicationWillTerminate(_ notification: Notification) { controller?.stop() }
