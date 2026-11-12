@@ -1,6 +1,6 @@
 {
   "name": "omp-usage-panel",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Node-only omp usage collector and native macOS usage panel",

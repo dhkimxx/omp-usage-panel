@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.0.1
 
-- Add release automation: a trusted-GitHub-runner universal DMG candidate with build-provenance attestation, `release:ci-build`, `release:verify-ci` and `release:package -- --ci-run <ID>` to sign the exact attested bytes locally, and a keyless `release:audit` of the committed feed against public assets. The update key stays local; CI never signs or publishes, and automation leaves the existing application release, signed feed and update protocol untouched.
+- Add release automation: a trusted-GitHub-runner universal DMG candidate with build-provenance attestation, `release:ci-build`, `release:verify-ci` and `release:package -- --ci-run <ID>` to sign the exact attested bytes locally, and a keyless `release:audit` of the committed feed against public assets. The update key stays local; CI never signs or publishes, and the existing update protocol remains compatible.
 - Hide a removed provider's compact ring and reconcile open provider details after a successful usage result no longer reports it. Keep saved selection and side settings for reconnection, and retain the last confirmed connection set across failed or stale refreshes so removals are not undone. Before the first authoritative result, retain existing warning placeholders. Removal follows the configured collection/cache timing (a 60-second poll and five-minute cache by default), or a forced **Refresh**; the panel does not watch or edit omp's credential store.
+- Fix the release CLI's module-evaluation cycle when importing a CI candidate; authentication failures now reach the normal refusal path rather than exiting with an unsettled top-level await.
 
 ## 1.0.0
 
