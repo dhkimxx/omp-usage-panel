@@ -200,4 +200,151 @@ func runGeneralSettingsDraftTests() {
     staged.rebaseUpdatePolicy(from: committedPolicy, to: changedElsewhere)
     precondition(staged.updatePolicy == UpdatePolicy(automaticChecks: true, automaticInstallation: true, notificationsEnabled: false))
     precondition(staged.hasChanges(from: tracked, updatePolicy: changedElsewhere))
+
+    runUnifiedCompactDraftTests()
+}
+
+/// Compact view staging inside the unified draft: per-profile scopes, shared maximum, per-provider sides, baseline
+/// rebasing and the commit that carries every changed scope.
+private func runUnifiedCompactDraftTests() {
+    typealias Draft = GeneralSettingsDraft
+
+    func choices(_ ids: [String]) -> [CompactProviderChoice] { ids.map { CompactProviderChoice(id: $0, label: $0.uppercased(), detail: nil, isReported: true) } }
+    func snapshot(selected: [String]? = nil, maximum: Int = 6, defaultSide: CompactWingSide = .left,
+                  sides: [String: CompactWingSide] = [:], providers: [String] = ["a", "b", "c"]) -> CompactSettingsSnapshot {
+        CompactSettingsSnapshot(preferences: CompactPreferences(maximumVisibleSlots: maximum, selectedProviderIDs: selected,
+                                                                defaultSide: defaultSide, providerSides: sides),
+                                providers: choices(providers))
+    }
+    func commit(_ draft: Draft) -> SettingsCommit? { try? draft.commit() }
+    func failure(_ draft: Draft) -> [Draft.Issue] {
+        do { _ = try draft.commit(); return [] } catch let failure as Draft.Failure { return failure.issues } catch { return [] }
+    }
+    let config = draftConfig()
+    let saved = snapshot(selected: ["a", "b", "c", "d", "e", "f"], maximum: 6, defaultSide: .left)
+
+    // Untouched compact drafts never produce a change, so legacy six selections / max 6 / all-left are not rewritten.
+    var untouched = Draft(config: config, compactSnapshot: saved)
+    precondition(!untouched.hasChanges(from: config, updatePolicy: .defaults) && commit(untouched)?.compactChanges.isEmpty == true)
+    precondition(untouched.compact?.choices.map(\.id) == ["a", "b", "c", "d", "e", "f"], "saved IDs missing from the report stay listed and selectable")
+    precondition(untouched.compact?.choices.dropFirst(3).allSatisfy { !$0.isReported } == true)
+
+    // Per-provider side: stored as an override only when it differs from the default; everything else is preserved.
+    untouched.editCompact { $0.setSide(.right, for: "b") }
+    let sided = commit(untouched)?.compactChanges
+    precondition(sided?.count == 1 && sided?[0].profile == "default")
+    precondition(sided?[0].preferences == CompactPreferences(maximumVisibleSlots: 6, selectedProviderIDs: ["a", "b", "c", "d", "e", "f"],
+                                                              defaultSide: .left, providerSides: ["b": .right]), "only the side changed")
+    precondition(untouched.compact?.side(for: "a") == .left && untouched.compact?.side(for: "b") == .right)
+    untouched.editCompact { $0.setSide(.left, for: "b") }
+    precondition(!untouched.hasChanges(from: config, updatePolicy: .defaults), "reverting a side is not a change")
+
+    // Overrides of deselected providers survive deselection and reselection; selection order is staging order.
+    var overrides = Draft(config: config, compactSnapshot: snapshot(selected: ["a", "b"], sides: ["b": .right, "z": .right]))
+    overrides.editCompact { $0.setSelected(false, id: "b"); $0.setSelected(true, id: "c") }
+    var prefs = commit(overrides)?.compactChanges.first?.preferences
+    precondition(prefs?.selectedProviderIDs == ["a", "c"] && prefs?.providerSides == ["b": .right, "z": .right], "deselected/unreported overrides are kept")
+    overrides.editCompact { $0.clearSelection() }
+    precondition(commit(overrides)?.compactChanges.first?.preferences.selectedProviderIDs == [], "clear is explicit none, not uninitialized")
+    overrides.editCompact { $0.selectAll() }
+    prefs = commit(overrides)?.compactChanges.first?.preferences
+    precondition(prefs?.selectedProviderIDs == ["a", "b", "c"], "select all keeps reported order")
+
+    // Exact provider identity: canonically-equivalent IDs are different providers.
+    let precomposed = "\u{00E9}"
+    let decomposed = "e\u{0301}"
+    var exact = Draft(config: config, compactSnapshot: snapshot(selected: [], providers: [precomposed, decomposed]))
+    exact.editCompact { $0.setSelected(true, id: decomposed) }
+    precondition(exact.compact?.isSelected(decomposed) == true && exact.compact?.isSelected(precomposed) == false)
+    precondition(commit(exact)?.compactChanges.first?.preferences.selectedProviderIDs?.count == 1)
+
+    // One shared maximum: strict whole numbers; invalid text blocks the whole save; stepping floors at 1.
+    var maximum = Draft(config: config, compactSnapshot: saved)
+    for bad in ["", "0", "-1", "1.5", "abc", "1e2", "٣"] {
+        maximum.setText(bad, for: .compactMaximum)
+        precondition(failure(maximum).contains { $0.field == .compactMaximum } && commit(maximum) == nil, "'\(bad)' must be rejected")
+    }
+    maximum.setText(" 2 ", for: .compactMaximum)
+    precondition(commit(maximum)?.compactChanges.first?.preferences.maximumVisibleSlots == 2)
+    maximum.editCompact { $0.maximumText = "1" }
+    maximum.editCompact { $0.adjustMaximum(by: -1) }
+    precondition(maximum.text(for: .compactMaximum) == "1")
+    maximum.editCompact { $0.adjustMaximum(by: 1) }
+    precondition(maximum.text(for: .compactMaximum) == "2")
+    maximum.setText("6", for: .compactMaximum)
+    precondition(!maximum.hasChanges(from: config, updatePolicy: .defaults), "typing then reverting the maximum is not a change")
+    maximum.setText("x", for: .compactMaximum)
+    precondition(maximum.hasChanges(from: config, updatePolicy: .defaults), "invalid text counts as unsaved")
+    var invalidAlongside = maximum
+    invalidAlongside.setText("relative", for: .ompPath)
+    precondition(Set(failure(invalidAlongside).map(\.field)) == [.compactMaximum, .ompPath], "config and compact problems are reported together")
+
+    // Delayed first seed and refreshed baselines reach only UNEDITED fields; edits and typed text are kept.
+    var delayed = Draft(config: config, compactSnapshot: snapshot(selected: nil, maximum: 3, defaultSide: .right))
+    delayed.editCompact { $0.setSide(.left, for: "a") }
+    delayed.installCompactSnapshot(snapshot(selected: ["a", "b"], maximum: 4, defaultSide: .right, sides: ["c": .left]), scope: "default")
+    precondition(delayed.compact?.selectedProviderIDs == ["a", "b"], "an untouched nil selection adopts the delayed seed")
+    precondition(delayed.compact?.maximumText == "4", "an untouched maximum follows the refreshed baseline")
+    precondition(delayed.compact?.side(for: "a") == .left && delayed.compact?.side(for: "c") == .left, "edited side kept, untouched override adopted")
+    precondition(delayed.compact?.choices.map(\.id) == ["a", "b", "c"])
+    var edited = Draft(config: config, compactSnapshot: snapshot(selected: nil, maximum: 3))
+    edited.editCompact { $0.clearSelection(); $0.maximumText = "5" }
+    edited.installCompactSnapshot(snapshot(selected: ["a", "b"], maximum: 4), scope: "default")
+    precondition(edited.compact?.selectedProviderIDs == [] && edited.compact?.maximumText == "5", "edited selection/maximum are never overwritten")
+    precondition(edited.hasChanges(from: config, updatePolicy: .defaults))
+    // After the seed becomes the baseline, saving an unrelated field must not re-save compact preferences.
+    var seeded = Draft(config: config, compactSnapshot: snapshot(selected: nil))
+    seeded.installCompactSnapshot(snapshot(selected: ["a"]), scope: "default")
+    seeded.setText("61", for: .refreshSeconds)
+    precondition(commit(seeded)?.compactChanges.isEmpty == true)
+
+    // Profile scopes: destination preferences are read, never copied from the previous profile; visited drafts
+    // are retained and every changed scope is committed; unchanged visited scopes are not.
+    var scoped = Draft(config: config, compactSnapshot: snapshot(selected: ["a"], maximum: 4))
+    precondition(scoped.compactScope == "default")
+    scoped.editCompact { $0.selectAll() }
+    scoped.setText("  work ", for: .profile)
+    precondition(scoped.compactScope == "work" && scoped.needsCompactSnapshot && scoped.compact == nil, "a new scope starts with no draft")
+    scoped.editCompact { $0.clearSelection() }
+    precondition(scoped.compactDrafts["default"]?.selectedProviderIDs == ["a", "b", "c"], "edits never reach another scope")
+    scoped.installCompactSnapshot(snapshot(selected: ["b"], maximum: 2, defaultSide: .right), scope: scoped.compactScope)
+    precondition(scoped.compact?.selectedProviderIDs == ["b"] && scoped.compact?.maximumText == "2", "destination preferences, not the old profile's")
+    precondition(scoped.hasChanges(from: config, updatePolicy: .defaults), "profile text and the earlier scope's edit are both unsaved")
+    let visited = commit(scoped)
+    precondition(visited?.config.profile == "  work " && visited?.compactChanges.map(\.profile) == ["default"], "only changed scopes, trimmed scope names")
+    scoped.editCompact { $0.setSide(.left, for: "b") }
+    precondition(commit(scoped)?.compactChanges.map(\.profile) == ["default", "work"] && commit(scoped)?.compactChanges.last?.preferences.providerSides == ["b": .left])
+    scoped.setText("default", for: .profile)
+    precondition(scoped.compact?.selectedProviderIDs == ["a", "b", "c"] && !scoped.needsCompactSnapshot, "revisiting a scope keeps its draft")
+    scoped.setText("   ", for: .profile)
+    precondition(scoped.compactScope == "default" && failure(scoped).contains { $0.field == .profile }, "a blank profile maps to default but cannot be saved")
+
+    // An invalid maximum staged under another profile still blocks the save and names that profile.
+    var other = Draft(config: config, compactSnapshot: snapshot())
+    other.setText("other", for: .profile)
+    other.installCompactSnapshot(snapshot(), scope: "other")
+    other.setText("x", for: .compactMaximum)
+    other.setText("default", for: .profile)
+    let otherIssues = failure(other)
+    precondition(otherIssues.count == 1 && otherIssues[0].scope == "other" && otherIssues[0].message.contains("other"))
+    other.setText("other", for: .profile)
+    precondition(failure(other).first?.scope == nil, "the visible scope's problem is shown inline")
+
+    // Compact edits count as unsaved changes and ride alongside the config and the staged update policy.
+    let policy = UpdatePolicy(automaticChecks: true, automaticInstallation: false, notificationsEnabled: true)
+    var combined = Draft(config: config, updatePolicy: policy, compactSnapshot: saved)
+    combined.updatePolicy.notificationsEnabled = false
+    combined.editCompact { $0.setSide(.right, for: "a") }
+    let both = commit(combined)
+    precondition(both?.updatePolicy.notificationsEnabled == false && both?.config == config && both?.compactChanges.count == 1)
+    combined.updatePolicy = policy
+    precondition(combined.hasChanges(from: config, updatePolicy: policy), "a compact-only edit is an unsaved change")
+    combined.editCompact { $0.setSide(.left, for: "a") }
+    precondition(!combined.hasChanges(from: config, updatePolicy: policy))
+
+    // Without a snapshot loader the compact section simply has nothing to edit or commit.
+    var bare = Draft(config: config)
+    bare.editCompact { $0.clearSelection() }
+    bare.setText("3", for: .compactMaximum)
+    precondition(bare.compact == nil && commit(bare)?.compactChanges.isEmpty == true && !bare.hasChanges(from: config, updatePolicy: .defaults))
 }

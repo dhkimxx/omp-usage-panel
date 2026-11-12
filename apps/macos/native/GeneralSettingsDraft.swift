@@ -1,5 +1,144 @@
 import Foundation
 
+/// Read-only view of one profile's saved compact preferences plus the provider choices to show. Foundation-only;
+/// built by the integrator (live choices for the running profile, saved IDs for any other profile).
+struct CompactSettingsSnapshot: Equatable {
+    let preferences: CompactPreferences
+    let providers: [CompactProviderChoice]
+}
+
+/// One compact-preferences write, scoped by the trimmed profile name (`default` when blank).
+struct ScopedCompactChange: Equatable {
+    let profile: String
+    let preferences: CompactPreferences
+}
+
+/// Everything one Save commits: the collector configuration, the staged updater policy and every changed
+/// profile-scoped compact draft (only drafts that differ from their saved baseline appear).
+struct SettingsCommit: Equatable {
+    let config: PanelConfig
+    let updatePolicy: UpdatePolicy
+    let compactChanges: [ScopedCompactChange]
+}
+
+/// Staged compact-view editing state for ONE profile scope. `maximumText` is kept as typed so invalid text is
+/// reportable; selection and per-provider sides are edited values over a saved `baseline`. Nothing here persists.
+struct CompactSettingsDraft: Equatable {
+    static let invalidMaximumMessage = "Enter a whole number of 1 or more."
+
+    private(set) var baseline: CompactSettingsSnapshot
+    var maximumText: String
+    private(set) var selectedProviderIDs: [String]?
+    private(set) var providerSides: [String: CompactWingSide]
+
+    init(snapshot: CompactSettingsSnapshot) {
+        baseline = snapshot
+        maximumText = String(snapshot.preferences.maximumVisibleSlots)
+        selectedProviderIDs = snapshot.preferences.selectedProviderIDs
+        providerSides = snapshot.preferences.providerSides
+    }
+
+    // MARK: Reading
+
+    /// Strict whole number >= 1 (surrounding spaces allowed, ASCII digits only).
+    static func parseMaximum(_ text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isASCII && $0.isNumber }), let value = Int(trimmed), value >= 1 else { return nil }
+        return value
+    }
+
+    var parsedMaximum: Int? { Self.parseMaximum(maximumText) }
+
+    /// Reported providers first, then every saved or staged selection that is not reported (kept selectable).
+    var choices: [CompactProviderChoice] {
+        var result = baseline.providers
+        var known = Set(result.map { $0.id.exactKey })
+        for id in (baseline.preferences.selectedProviderIDs ?? []) + (selectedProviderIDs ?? []) where known.insert(id.exactKey).inserted {
+            result.append(CompactProviderChoice(id: id, label: id, detail: nil, isReported: false))
+        }
+        return result
+    }
+
+    func isSelected(_ id: String) -> Bool { (selectedProviderIDs ?? []).contains { $0.isExactlyEqual(to: id) } }
+
+    func side(for id: String) -> CompactWingSide { currentPreferences(maximum: 1).side(for: id) }
+
+    /// The staged preferences, or nil while the maximum text is invalid.
+    func preferences() -> CompactPreferences? { parsedMaximum.map { currentPreferences(maximum: $0) } }
+
+    private func currentPreferences(maximum: Int) -> CompactPreferences {
+        CompactPreferences(maximumVisibleSlots: maximum, selectedProviderIDs: selectedProviderIDs,
+                           defaultSide: baseline.preferences.defaultSide, providerSides: providerSides)
+    }
+
+    /// True when the staged values differ in effect from the saved ones (typing then reverting is no change; an
+    /// override equal to the default side counts the same as no override). Invalid maximum text is a change.
+    var hasChanges: Bool {
+        guard let staged = preferences() else { return true }
+        return !Self.sameEffect(staged, baseline.preferences)
+    }
+
+    private static func sameEffect(_ a: CompactPreferences, _ b: CompactPreferences) -> Bool {
+        guard a.maximumVisibleSlots == b.maximumVisibleSlots, a.defaultSide == b.defaultSide,
+              sameIDs(a.selectedProviderIDs, b.selectedProviderIDs) else { return false }
+        return Set(a.providerSides.keys).union(b.providerSides.keys).allSatisfy { a.side(for: $0) == b.side(for: $0) }
+    }
+
+    private static func sameIDs(_ a: [String]?, _ b: [String]?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (a?, b?): return a.count == b.count && zip(a, b).allSatisfy { $0.isExactlyEqual(to: $1) }
+        default: return false
+        }
+    }
+
+    /// Plain-language fit of the staged selection into the staged maximum (all slots are one shared budget).
+    var summary: String {
+        let count = Set((selectedProviderIDs ?? []).map(\.exactKey)).count
+        let slots = parsedMaximum ?? baseline.preferences.maximumVisibleSlots
+        return CompactPreferences.capacitySummary(selectedCount: count, maximum: slots)
+    }
+
+    // MARK: Editing
+
+    /// Steps the staged maximum by `delta` from its parsed value (or the saved one while the text is invalid).
+    mutating func adjustMaximum(by delta: Int) {
+        let current = parsedMaximum ?? baseline.preferences.maximumVisibleSlots
+        let value = delta > 0 ? (current > Int.max - delta ? Int.max : current + delta) : max(1, current + delta)
+        maximumText = String(value)
+    }
+
+    mutating func setSelected(_ selected: Bool, id: String) {
+        var ids = selectedProviderIDs ?? []
+        if selected { if !ids.contains(where: { $0.isExactlyEqual(to: id) }) { ids.append(id) } }
+        else { ids.removeAll { $0.isExactlyEqual(to: id) } }
+        selectedProviderIDs = ids
+    }
+
+    mutating func selectAll() { selectedProviderIDs = choices.map(\.id) }
+    mutating func clearSelection() { selectedProviderIDs = [] }
+
+    /// An explicit choice equal to the default side is stored as "no override" so reverting is not a change.
+    mutating func setSide(_ side: CompactWingSide, for id: String) {
+        providerSides[id] = side == baseline.preferences.defaultSide ? nil : side
+    }
+
+    /// Adopts a refreshed saved baseline for every field the user has not edited since the previous baseline
+    /// (including the delayed first selection seed); edited fields, text and sides are kept.
+    mutating func rebase(to snapshot: CompactSettingsSnapshot) {
+        let old = baseline.preferences
+        let new = snapshot.preferences
+        if maximumText == String(old.maximumVisibleSlots) { maximumText = String(new.maximumVisibleSlots) }
+        if Self.sameIDs(selectedProviderIDs, old.selectedProviderIDs) { selectedProviderIDs = new.selectedProviderIDs }
+        let stagedDefault = old.defaultSide
+        for key in Set(old.providerSides.keys).union(new.providerSides.keys).union(providerSides.keys) {
+            let staged = providerSides[key] ?? stagedDefault
+            if staged == old.side(for: key) { providerSides[key] = new.providerSides[key] }
+        }
+        baseline = snapshot
+    }
+}
+
 /// Transactional, typed editing state for the 12 editable `config.json` fields (`version` stays read-only).
 /// Numbers are kept as the user's text; providers/labels/metrics are ordered rows with stable identities so
 /// duplicates are detected *before* any dictionary is built (a dictionary would silently keep the last row).
@@ -12,6 +151,8 @@ struct GeneralSettingsDraft: Equatable {
         case nodePath, ompPath, profile
         case refreshSeconds, cacheMinutes, timeoutSeconds, warnPercent, criticalPercent
         case providers, labels, metrics
+        /// Staged total compact slots of the currently edited compact profile.
+        case compactMaximum
 
         init?(configKey: String) {
             switch configKey {
@@ -53,6 +194,8 @@ struct GeneralSettingsDraft: Equatable {
         let field: Field
         let rowID: Int?
         let message: String
+        /// Set for compact problems of a profile other than the one currently edited.
+        var scope: String? = nil
     }
 
     struct Failure: Error, LocalizedError {
@@ -139,8 +282,12 @@ struct GeneralSettingsDraft: Equatable {
     private(set) var labelRows: [Row] = []
     private(set) var metricRows: [Row] = []
     private var nextRowID = 0
+    /// One staged compact draft per visited profile scope (trimmed profile, `default` when blank). Visiting a
+    /// scope only reads its saved preferences; nothing is carried between scopes.
+    private(set) var compactDrafts: [String: CompactSettingsDraft] = [:]
+    private var compactScopeOrder: [String] = []
 
-    init(config: PanelConfig, updatePolicy: UpdatePolicy = .defaults) {
+    init(config: PanelConfig, updatePolicy: UpdatePolicy = .defaults, compactSnapshot: CompactSettingsSnapshot? = nil) {
         version = config.version
         nodePath = config.nodePath
         ompPath = config.ompPath
@@ -156,6 +303,7 @@ struct GeneralSettingsDraft: Equatable {
         for provider in config.providers ?? [] { addRow(.providers, key: provider) }
         for entry in config.labels.sortedEntries { addRow(.labels, key: entry.key, value: entry.value) }
         for entry in config.metrics.sortedEntries { addRow(.metrics, key: entry.key, value: entry.value) }
+        if let compactSnapshot { installCompactSnapshot(compactSnapshot, scope: Self.compactScope(for: config.profile)) }
     }
 
     // MARK: Change tracking
@@ -171,7 +319,7 @@ struct GeneralSettingsDraft: Equatable {
             || criticalPercent != base.criticalPercent || showPace != base.showPace
             || providerMode != base.providerMode || updatePolicy != base.updatePolicy
             || values(providerRows) != values(base.providerRows) || values(labelRows) != values(base.labelRows)
-            || values(metricRows) != values(base.metricRows)
+            || values(metricRows) != values(base.metricRows) || hasCompactChanges
     }
 
     /// Follows a committed policy change made elsewhere (for example "Turn Off Notifications" in the update
@@ -181,6 +329,41 @@ struct GeneralSettingsDraft: Equatable {
         if updatePolicy.automaticInstallation == old.automaticInstallation { updatePolicy.automaticInstallation = new.automaticInstallation }
         if updatePolicy.notificationsEnabled == old.notificationsEnabled { updatePolicy.notificationsEnabled = new.notificationsEnabled }
     }
+
+    // MARK: Compact view (profile-scoped)
+
+    /// The storage scope of a profile name: trimmed, `default` when blank (same normalization as the saved store).
+    static func compactScope(for profile: String) -> String {
+        let trimmed = profile.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "default" : trimmed
+    }
+
+    /// The scope the compact section currently edits: follows the staged profile text.
+    var compactScope: String { Self.compactScope(for: profile) }
+
+    /// The compact draft of the current scope, nil until a snapshot was installed for it.
+    var compact: CompactSettingsDraft? { compactDrafts[compactScope] }
+
+    var needsCompactSnapshot: Bool { compact == nil }
+
+    /// Creates the scope's draft from a saved snapshot, or rebases an existing draft (unedited fields follow).
+    mutating func installCompactSnapshot(_ snapshot: CompactSettingsSnapshot, scope: String) {
+        if compactDrafts[scope] != nil { compactDrafts[scope]?.rebase(to: snapshot) }
+        else {
+            compactDrafts[scope] = CompactSettingsDraft(snapshot: snapshot)
+            compactScopeOrder.append(scope)
+        }
+    }
+
+    /// Edits the current scope's draft; no-op while no snapshot exists for it.
+    mutating func editCompact(_ body: (inout CompactSettingsDraft) -> Void) {
+        let scope = compactScope
+        guard compactDrafts[scope] != nil else { return }
+        body(&compactDrafts[scope]!)
+    }
+
+    /// True when any visited scope differs from its saved baseline.
+    var hasCompactChanges: Bool { compactDrafts.values.contains { $0.hasChanges } }
 
     // MARK: Text fields
 
@@ -194,6 +377,7 @@ struct GeneralSettingsDraft: Equatable {
         case .timeoutSeconds: return timeoutSeconds
         case .warnPercent: return warnPercent
         case .criticalPercent: return criticalPercent
+        case .compactMaximum: return compact?.maximumText ?? ""
         case .providers, .labels, .metrics: return ""
         }
     }
@@ -208,6 +392,7 @@ struct GeneralSettingsDraft: Equatable {
         case .timeoutSeconds: timeoutSeconds = text
         case .warnPercent: warnPercent = text
         case .criticalPercent: criticalPercent = text
+        case .compactMaximum: editCompact { $0.maximumText = text }
         case .providers, .labels, .metrics: break
         }
     }
@@ -330,6 +515,29 @@ struct GeneralSettingsDraft: Equatable {
             throw Failure(issues: [Issue(field: .nodePath, rowID: nil, message: error.localizedDescription)])
         }
         return config
+    }
+
+    /// Validates the whole draft into one commit: the configuration, the staged update policy and every visited
+    /// compact scope that differs from its saved baseline (an invalid maximum blocks the whole save).
+    func commit() throws -> SettingsCommit {
+        var issues: [Issue] = []
+        var config: PanelConfig?
+        do { config = try candidate() }
+        catch let failure as Failure { issues += failure.issues }
+        var changes: [ScopedCompactChange] = []
+        for scope in compactScopeOrder {
+            guard let draft = compactDrafts[scope], draft.hasChanges else { continue }
+            if let preferences = draft.preferences() {
+                changes.append(ScopedCompactChange(profile: scope, preferences: preferences))
+            } else if scope == compactScope {
+                issues.append(Issue(field: .compactMaximum, rowID: nil, message: CompactSettingsDraft.invalidMaximumMessage))
+            } else {
+                issues.append(Issue(field: .compactMaximum, rowID: nil,
+                                    message: "Compact maximum for profile \u{201C}\(scope)\u{201D}: \(CompactSettingsDraft.invalidMaximumMessage)", scope: scope))
+            }
+        }
+        guard issues.isEmpty, let config else { throw Failure(issues: issues) }
+        return SettingsCommit(config: config, updatePolicy: updatePolicy, compactChanges: changes)
     }
 
     // MARK: Number text

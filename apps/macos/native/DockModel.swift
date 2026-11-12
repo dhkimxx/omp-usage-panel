@@ -27,7 +27,11 @@ struct DockLayout: Equatable {
     let mode: DockPlacementMode
     let bodyRect: CGRect
     let cameraRect: CGRect
-    let indicatorRect: CGRect
+    /// Local rectangles of the occupied compact groups; an empty wing/group is exactly `.zero`.
+    let leftIndicatorRect: CGRect
+    let rightIndicatorRect: CGRect
+
+    var occupiedIndicatorRects: [CGRect] { [leftIndicatorRect, rightIndicatorRect].filter { !$0.isEmpty } }
 }
 
 // Fixed visual contract for the compact ring-only display.
@@ -44,18 +48,24 @@ enum CompactMetrics {
     static let slotLimit = 4096
 
     static var slotPitch: CGFloat { ringDiameter + gap }
-    static func bounded(_ slots: Int) -> Int { min(max(slots, 1), slotLimit) }
+    // An empty wing/group (zero controls) occupies nothing.
+    static func bounded(_ slots: Int) -> Int { min(max(slots, 0), slotLimit) }
     static func contentWidth(slots: Int) -> CGFloat {
-        let n = CGFloat(bounded(slots))
+        let count = bounded(slots)
+        guard count > 0 else { return 0 }
+        let n = CGFloat(count)
         return n * ringDiameter + (n - 1) * gap
     }
-    // 26n + 12: camera-side and outer padding around the row.
-    static func wingWidth(_ slots: Int) -> CGFloat { contentWidth(slots: slots) + cameraPadding + outerPadding }
-    // 26n + 20: the detached capsule is content plus 24pt.
-    static func floatingWidth(slots: Int) -> CGFloat { contentWidth(slots: slots) + 2 * floatingPadding }
+    // 26n + 12: camera-side and outer padding around one occupied wing; an empty wing is zero.
+    static func wingWidth(_ slots: Int) -> CGFloat {
+        bounded(slots) == 0 ? 0 : contentWidth(slots: slots) + cameraPadding + outerPadding
+    }
+    // 26n + 20: the detached capsule is content plus 24pt (never narrower than one control).
+    static func floatingWidth(slots: Int) -> CGFloat { contentWidth(slots: max(1, slots)) + 2 * floatingPadding }
 
-    // Left edge of the compact row inside its indicator region: attached rows start at the
-    // camera-side padding (overflowing outward); detached rows are centered.
+    // Left edge of one compact row inside its indicator region: attached rows hug the camera side
+    // (left wing right-aligned, right wing left-aligned, overflowing outward); detached rows are
+    // centered in their own region.
     static func rowMinX(in indicator: CGRect, attached: Bool, side: CompactWingSide, slots: Int) -> CGFloat {
         let width = contentWidth(slots: slots)
         guard attached else { return indicator.midX - width / 2 }
@@ -113,20 +123,29 @@ enum DockGeometry {
         return max(0, space - notchMargin(screen))
     }
 
-    // Physical slot capacity (always at least one) for the placement `layout` would choose.
-    static func compactCapacity(screen: DockScreenMetrics, side: CompactWingSide,
-                                manualTopCenter: CGPoint? = nil) -> Int {
+    // Independent physical slot capacities for the placement `layout` would
+    // choose. An attached notch computes each side of the fixed camera separately; a floating
+    // capsule is one row whose total capacity is real, so either group can use all of it.
+    static func compactCapacities(screen: DockScreenMetrics, manualTopCenter: CGPoint? = nil) -> CompactCapacities {
         let frame = screen.frame
-        guard finite(frame), frame.width > 0 else { return 1 }
+        guard finite(frame), frame.width > 0 else { return CompactCapacities(left: 1, right: 1, total: 1) }
         if manualTopCenter == nil, notch(in: screen) != nil {
-            return CompactMetrics.capacity(forWingWidth: maximumWing(screen: screen, side: side))
+            // Each wing is bounded by its own physical width; a wing with no room at all is zero.
+            let leftWing = maximumWing(screen: screen, side: .left)
+            let rightWing = maximumWing(screen: screen, side: .right)
+            let left = leftWing > 0 ? CompactMetrics.capacity(forWingWidth: leftWing) : 0
+            let right = rightWing > 0 ? CompactMetrics.capacity(forWingWidth: rightWing) : 0
+            return CompactCapacities(left: left, right: right, total: left + right)
         }
-        return CompactMetrics.floatingCapacity(forWidth: frame.width - 2 * min(8, frame.width / 4))
+        let capacity = CompactMetrics.floatingCapacity(forWidth: frame.width - 2 * min(8, frame.width / 4))
+        return CompactCapacities(left: capacity, right: capacity, total: capacity)
     }
 
+    // `leftCompactSlots` / `rightCompactSlots` are the ACTUAL planned control counts per wing;
+    // either may be zero (that wing is then absent). Attached, the frame spans only the occupied
+    // wings and the real camera. Detached/no-notch, both groups share one capsule.
     static func layout(screen: DockScreenMetrics, presentation: DockPresentation,
-                       preferredExpandedSize: CGSize, compactSlots: Int,
-                       side: CompactWingSide = .right,
+                       preferredExpandedSize: CGSize, leftCompactSlots: Int, rightCompactSlots: Int,
                        manualTopCenter: CGPoint? = nil,
                        preferredAnchorWidth: CGFloat? = nil) -> DockLayout? {
         let frame = screen.frame
@@ -152,37 +171,45 @@ enum DockGeometry {
             let stripHeight = min(10, availableHeight - cameraHeight)
             // Keep the camera's real position fixed even on asymmetric screen layouts.
             let margin = notchMargin(screen)
-            let wingLimit = maximumWing(screen: screen, side: side)
-            let slots = min(max(compactSlots, 1), CompactMetrics.capacity(forWingWidth: wingLimit))
-            let wing = min(CompactMetrics.wingWidth(slots), wingLimit)
+            let leftLimit = maximumWing(screen: screen, side: .left)
+            let rightLimit = maximumWing(screen: screen, side: .right)
+            let leftSlots = leftLimit > 0 ? min(CompactMetrics.bounded(leftCompactSlots), CompactMetrics.capacity(forWingWidth: leftLimit)) : 0
+            let rightSlots = rightLimit > 0 ? min(CompactMetrics.bounded(rightCompactSlots), CompactMetrics.capacity(forWingWidth: rightLimit)) : 0
+            // An empty wing is exactly zero wide.
+            let leftWing = leftSlots == 0 ? 0 : min(CompactMetrics.wingWidth(leftSlots), leftLimit)
+            let rightWing = rightSlots == 0 ? 0 : min(CompactMetrics.wingWidth(rightSlots), rightLimit)
             let compactHeight = min(max(cameraHeight, CompactMetrics.rowHeight), availableHeight)
             let availableWidth = 2 * min(notch.center - frame.minX - margin,
                                          frame.maxX - margin - notch.center)
-            let desiredWidth = isCompact ? notch.width + wing :
+            let desiredWidth = isCompact ? leftWing + notch.width + rightWing :
                 max(preferredExpandedSize.width, notch.width + 200) + 36
             let width = isCompact ? desiredWidth : min(desiredWidth, availableWidth)
             let minimumHeight = cameraHeight + stripHeight
             let height = isCompact ? compactHeight :
                 min(max(preferredExpandedSize.height, minimumHeight), availableHeight)
-            guard width.isFinite, height.isFinite, wing > 0, width >= notch.width, height >= cameraHeight else { return nil }
+            guard width.isFinite, height.isFinite, leftSlots == 0 || leftWing > 0, rightSlots == 0 || rightWing > 0,
+                  width >= notch.width, height >= cameraHeight else { return nil }
             let notchLeft = screen.auxiliaryTopLeft.maxX
             let notchRight = screen.auxiliaryTopRight.minX
-            let frameMinX = isCompact ? (side == .right ? notchLeft : notchLeft - wing)
-                                      : notch.center - width / 2
+            let frameMinX = isCompact ? notchLeft - leftWing : notch.center - width / 2
             let bodyInset = isCompact ? 0 : min(18, (width - notch.width) / 2)
             let body = CGRect(x: bodyInset, y: 0, width: width - 2 * bodyInset, height: height)
             let camera = CGRect(x: notchLeft - frameMinX, y: height - cameraHeight,
                                 width: notch.width, height: cameraHeight)
-            // The wing sits beside the camera; no row hangs below it. Expanded layouts keep
-            // the same global wing (clipped to the frame) so fading controls never jump.
-            let wingX = side == .right ? notchRight : notchLeft - wing
-            let indicators = CGRect(x: wingX - frameMinX, y: height - compactHeight,
-                                    width: wing, height: compactHeight)
-                .intersection(CGRect(x: 0, y: 0, width: width, height: height))
+            // Wings sit beside the camera; no row hangs below it. Expanded layouts keep the same
+            // global wings (clipped to the frame) so fading controls never jump.
+            let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+            func wing(x: CGFloat, width wingWidth: CGFloat) -> CGRect {
+                guard wingWidth > 0 else { return .zero }
+                let rect = CGRect(x: x - frameMinX, y: height - compactHeight, width: wingWidth, height: compactHeight)
+                    .intersection(bounds)
+                return rect.isNull ? .zero : rect
+            }
             return DockLayout(frame: CGRect(x: frameMinX, y: frame.maxY - height,
                                              width: width, height: height),
-                              mode: .notchConnected, bodyRect: body,
-                              cameraRect: camera, indicatorRect: indicators.isNull ? .zero : indicators)
+                              mode: .notchConnected, bodyRect: body, cameraRect: camera,
+                              leftIndicatorRect: wing(x: notchLeft - leftWing, width: leftWing),
+                              rightIndicatorRect: wing(x: notchRight, width: rightWing))
         }
 
         let safeTop = min(frame.maxY, screen.safeTop)
@@ -195,9 +222,12 @@ enum DockGeometry {
         guard availableWidth.isFinite, availableWidth > 0 else { return nil }
         let automaticGap: CGFloat = manualTopCenter == nil ? min(6, availableHeight / 2) : 0
         let maxHeight = availableHeight - automaticGap
-        // Capacity is derived from the width before any slot count becomes a length.
-        let slots = min(max(compactSlots, 1), CompactMetrics.floatingCapacity(forWidth: availableWidth))
-        let compactWidth = CompactMetrics.floatingWidth(slots: slots)
+        // Capacity is derived from the width before any slot count becomes a length. The one
+        // capsule holds both groups, so they share its capacity (left first).
+        let capacity = CompactMetrics.floatingCapacity(forWidth: availableWidth)
+        let leftSlots = min(CompactMetrics.bounded(leftCompactSlots), capacity)
+        let rightSlots = min(CompactMetrics.bounded(rightCompactSlots), capacity - leftSlots)
+        let compactWidth = CompactMetrics.floatingWidth(slots: leftSlots + rightSlots)
         let desiredWidth = isCompact ? compactWidth : preferredExpandedSize.width
         let desiredHeight: CGFloat = isCompact ? CompactMetrics.rowHeight : preferredExpandedSize.height
         let width = min(desiredWidth, availableWidth)
@@ -213,25 +243,60 @@ enum DockGeometry {
         let center = min(max(requestedCenter, minX + anchorWidth / 2), maxX - anchorWidth / 2)
         let body = CGRect(x: 0, y: 0, width: width, height: height)
         let stripHeight = min(CompactMetrics.rowHeight, height)
-        let stripWidth = min(compactWidth, width)
+        // Left group, one normal ring gap, right group: contiguous and centered, no camera gap.
+        let rowMinX = (width - CompactMetrics.contentWidth(slots: leftSlots + rightSlots)) / 2
+        func row(x: CGFloat, slots: Int) -> CGRect {
+            guard slots > 0 else { return .zero }
+            let rect = CGRect(x: x, y: height - stripHeight, width: CompactMetrics.contentWidth(slots: slots),
+                              height: stripHeight).intersection(body)
+            return rect.isNull ? .zero : rect
+        }
+        let rightMinX = rowMinX + (leftSlots > 0 ? CompactMetrics.contentWidth(slots: leftSlots) + CompactMetrics.gap : 0)
         return DockLayout(frame: CGRect(x: center - width / 2, y: top - height, width: width, height: height),
                           mode: .floating, bodyRect: body, cameraRect: .zero,
-                          indicatorRect: CGRect(x: (width - stripWidth) / 2, y: height - stripHeight,
-                                                width: stripWidth, height: stripHeight))
+                          leftIndicatorRect: row(x: rowMinX, slots: leftSlots),
+                          rightIndicatorRect: row(x: rightMinX, slots: rightSlots))
     }
 
     static func globalRect(_ rect: CGRect, in layout: DockLayout) -> CGRect {
         rect.offsetBy(dx: layout.frame.minX, dy: layout.frame.minY)
     }
 
-    // The visible compact row's top-center in screen space. Attached rows hug the camera side
-    // of the wing (asymmetric padding) and detached rows are centered, so this is not the
-    // frame's midpoint. A drag that grabs a ring must anchor here to follow the pointer exactly.
-    static func compactDragAnchor(_ layout: DockLayout, side: CompactWingSide, slots: Int) -> CGPoint {
-        let indicator = globalRect(layout.indicatorRect, in: layout)
-        let minX = CompactMetrics.rowMinX(in: indicator, attached: layout.mode == .notchConnected,
-                                          side: side, slots: slots)
-        return CGPoint(x: minX + CompactMetrics.contentWidth(slots: slots) / 2, y: indicator.maxY)
+    // The global top-center a detached capsule must take for the grabbed compact group to keep its
+    // exact screen position. Attached rows hug the camera from both sides (with the camera gap
+    // between them); the detached capsule is one contiguous row (left group, ring gap, right group)
+    // centered on the anchor. `grabPoint` is the global cursor: it selects the group under (or
+    // nearest to) it, so removing the camera gap never makes the grabbed rings jump. A layout that
+    // is already detached is one centered row, so its top-center is the anchor.
+    static func compactDragAnchor(_ layout: DockLayout, grabPoint: CGPoint, leftSlots: Int, rightSlots: Int) -> CGPoint {
+        let top = layout.frame.maxY
+        guard layout.mode == .notchConnected else { return CGPoint(x: layout.frame.midX, y: top) }
+        func group(_ rect: CGRect, side: CompactWingSide, slots: Int) -> (minX: CGFloat, maxX: CGFloat, slots: Int)? {
+            let count = CompactMetrics.bounded(slots)
+            guard count > 0, !rect.isEmpty else { return nil }
+            let minX = CompactMetrics.rowMinX(in: globalRect(rect, in: layout), attached: true, side: side, slots: count)
+            return (minX, minX + CompactMetrics.contentWidth(slots: count), count)
+        }
+        let left = group(layout.leftIndicatorRect, side: .left, slots: leftSlots)
+        let right = group(layout.rightIndicatorRect, side: .right, slots: rightSlots)
+        func distance(_ group: (minX: CGFloat, maxX: CGFloat, slots: Int)) -> CGFloat {
+            grabPoint.x < group.minX ? group.minX - grabPoint.x : max(0, grabPoint.x - group.maxX)
+        }
+        let grabbedMinX: CGFloat, offset: CGFloat
+        switch (left, right) {
+        case (nil, nil):
+            return CGPoint(x: layout.frame.midX, y: top)
+        case (let only?, nil):
+            grabbedMinX = only.minX; offset = 0
+        case (nil, let only?):
+            grabbedMinX = only.minX; offset = 0
+        case (let l?, let r?):
+            if distance(l) <= distance(r) { grabbedMinX = l.minX; offset = 0 }
+            else { grabbedMinX = r.minX; offset = CGFloat(l.slots) * CompactMetrics.slotPitch }
+        }
+        let total = (left?.slots ?? 0) + (right?.slots ?? 0)
+        let rowMinX = grabbedMinX - offset
+        return CGPoint(x: rowMinX + CompactMetrics.contentWidth(slots: total) / 2, y: top)
     }
 
     // Layouts may interpolate only when the physical anchor is shared: the same
@@ -261,6 +326,7 @@ enum DockGeometry {
         let center = mix(from.frame.midX, to.frame.midX)
         let top = mix(from.frame.maxY, to.frame.maxY)
         let frame = CGRect(x: center - width / 2, y: top - height, width: width, height: height)
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
         func rect(_ a: CGRect, _ b: CGRect) -> CGRect {
             let x = min(width, max(0, mix(a.minX, b.minX)))
             let y = min(height, max(0, mix(a.minY, b.minY)))
@@ -268,12 +334,25 @@ enum DockGeometry {
                           width: min(width - x, max(0, mix(a.width, b.width))),
                           height: min(height - y, max(0, mix(a.height, b.height))))
         }
-        // Local rectangles move with the changing frame origin. Their global camera
-        // and footer positions therefore remain fixed throughout attached transitions.
+        // The camera and compact rows are mixed in screen space and only then expressed in the
+        // interpolated frame, so a rect that is the same on screen at both ends stays exactly
+        // there throughout, however the frame moves. An absent (empty) wing at one end holds the
+        // other end's screen position instead of sweeping in from the frame origin.
+        func screenFixed(_ pick: (DockLayout) -> CGRect) -> CGRect {
+            let a = pick(from), b = pick(to)
+            guard !a.isEmpty || !b.isEmpty else { return .zero }
+            let ga = globalRect(a.isEmpty ? b : a, in: a.isEmpty ? to : from)
+            let gb = globalRect(b.isEmpty ? a : b, in: b.isEmpty ? from : to)
+            let mixed = CGRect(x: mix(ga.minX, gb.minX), y: mix(ga.minY, gb.minY),
+                               width: mix(ga.width, gb.width), height: mix(ga.height, gb.height))
+            let local = mixed.offsetBy(dx: -frame.minX, dy: -frame.minY).intersection(bounds)
+            return local.isNull ? .zero : local
+        }
         return DockLayout(frame: frame, mode: from.mode,
                           bodyRect: rect(from.bodyRect, to.bodyRect),
-                          cameraRect: rect(from.cameraRect, to.cameraRect),
-                          indicatorRect: rect(from.indicatorRect, to.indicatorRect))
+                          cameraRect: screenFixed { $0.cameraRect },
+                          leftIndicatorRect: screenFixed { $0.leftIndicatorRect },
+                          rightIndicatorRect: screenFixed { $0.rightIndicatorRect })
     }
 
     // AppKit owns the content view's realized size. Reconcile the drawing regions
@@ -291,17 +370,20 @@ enum DockGeometry {
                                       dy: layout.frame.minY - frame.minY).intersection(bounds)
             return moved.isNull ? .zero : moved
         }
-        let indicators: CGRect
-        if layout.mode == .notchConnected {
-            indicators = screenFixed(layout.indicatorRect)
-        } else {
-            let rect = layout.indicatorRect
-            indicators = CGRect(x: rect.minX, y: frame.height - (layout.frame.height - rect.minY),
-                                width: max(0, frame.width - rect.minX - (layout.frame.width - rect.maxX)),
-                                height: rect.height).intersection(bounds)
+        // A detached row keeps its exact size, stays on the realized top edge and keeps its
+        // centering when rounding widens the frame; both rows move together.
+        let centeredShift = (frame.width - layout.frame.width) / 2
+        func topAligned(_ rect: CGRect) -> CGRect {
+            guard !rect.isEmpty else { return .zero }
+            let moved = CGRect(x: rect.minX + centeredShift, y: frame.height - (layout.frame.height - rect.minY),
+                               width: rect.width, height: rect.height).intersection(bounds)
+            return moved.isNull ? .zero : moved
         }
+        let attached = layout.mode == .notchConnected
         return DockLayout(frame: frame, mode: layout.mode, bodyRect: insetRect(layout.bodyRect),
-                          cameraRect: screenFixed(layout.cameraRect), indicatorRect: indicators)
+                          cameraRect: screenFixed(layout.cameraRect),
+                          leftIndicatorRect: attached ? screenFixed(layout.leftIndicatorRect) : topAligned(layout.leftIndicatorRect),
+                          rightIndicatorRect: attached ? screenFixed(layout.rightIndicatorRect) : topAligned(layout.rightIndicatorRect))
     }
 }
 
@@ -532,49 +614,105 @@ enum CompactSlot: Equatable {
     }
 }
 
+struct CompactCapacities: Equatable {
+    let left: Int
+    let right: Int
+    let total: Int
+}
+
 struct CompactSlotPlan: Equatable {
-    let slots: [CompactSlot]
+    let leftSlots: [CompactSlot]
+    let rightSlots: [CompactSlot]
     let selectedCount: Int
     let hiddenProviderIDs: [String]
+
+    var slots: [CompactSlot] { leftSlots + rightSlots }
+    func slots(on side: CompactWingSide) -> [CompactSlot] { side == .left ? leftSlots : rightSlots }
 }
 
 enum CompactSlotPlanner {
-    // `maximumVisibleSlots` counts every compact control including More. Membership is
-    // independent of it: n selected providers over capacity c show c-1 rings and
-    // More(+n-c+1); c == 1 shows only More(+n). Rings never shrink to fit more.
-    static func plan(cards: [DashboardCard], selectedProviderIDs: [String]?,
-                     maximumVisibleSlots: Int, physicalCapacity: Int,
+    // `maximumVisibleSlots` is ONE budget for every compact control on both wings, including the
+    // single aggregate More control. Membership is independent of it. Each provider keeps its own
+    // wing (never moved to fit) and the wings are bounded independently by physical capacity.
+    // On overflow one slot is reserved for More on the wing of the first provider that cannot be
+    // shown; the remaining providers are then chosen greedily in their existing order. More lists
+    // every hidden provider, whichever wing it prefers.
+    static func plan(cards: [DashboardCard], preferences: CompactPreferences,
+                     physicalCapacity: CompactCapacities,
                      aliases: ExactConfigMap = [:], issue: String = "",
                      collecting: Bool = false) -> CompactSlotPlan {
-        var seen = Set<String>()
-        let selected = (selectedProviderIDs ?? []).filter { seen.insert($0).inserted }
+        let preferences = preferences.normalized
+        let selected = preferences.selectedProviderIDs ?? []
+        let selectedSet = Set(selected)
         var firstCard: [String: DashboardCard] = [:]
         for card in cards where firstCard[card.provider] == nil { firstCard[card.provider] = card }
         // Current upstream order first; selected IDs the data lacks follow in selection order.
         var entries: [CompactRingPresentation] = []
         var included = Set<String>()
-        for card in cards where seen.contains(card.provider) && included.insert(card.provider).inserted {
+        for card in cards where selectedSet.contains(card.provider) && included.insert(card.provider).inserted {
             entries.append(CompactRingPresentation(card: card))
         }
         for id in selected where firstCard[id] == nil {
             entries.append(CompactRingPresentation(missingProvider: id, label: aliases[id] ?? id, issue: issue))
         }
+        let sides = entries.map { preferences.side(for: $0.provider) }
+        // A wing may have genuinely zero physical room; nothing is forced into it. At least one wing
+        // must exist for the plan to show anything, so a fully degenerate input keeps the right wing.
+        let leftLimit = max(0, physicalCapacity.left)
+        var rightLimit = max(0, physicalCapacity.right)
+        if leftLimit == 0 && rightLimit == 0 { rightLimit = 1 }
         guard !entries.isEmpty else {
-            return CompactSlotPlan(
-                slots: [.configure(CompactConfigurePresentation(uninitialized: selectedProviderIDs == nil,
-                                                                issue: issue, collecting: collecting))],
-                selectedCount: 0, hiddenProviderIDs: [])
+            let configure = [CompactSlot.configure(CompactConfigurePresentation(
+                uninitialized: preferences.selectedProviderIDs == nil, issue: issue, collecting: collecting))]
+            // The default wing, unless it has no physical room at all.
+            let onLeft = preferences.defaultSide == .left ? leftLimit > 0 : rightLimit == 0
+            return CompactSlotPlan(leftSlots: onLeft ? configure : [], rightSlots: onLeft ? [] : configure,
+                                   selectedCount: 0, hiddenProviderIDs: [])
         }
-        let capacity = max(1, min(maximumVisibleSlots, max(1, physicalCapacity)))
-        if entries.count <= capacity {
-            return CompactSlotPlan(slots: entries.map { .provider($0) }, selectedCount: entries.count,
-                                   hiddenProviderIDs: [])
+        let budget = max(1, min(preferences.maximumVisibleSlots, max(1, physicalCapacity.total)))
+
+        // Greedy in existing order: a provider whose wing is full is skipped (never moved),
+        // and choosing stops once the total ring budget is spent.
+        func choose(rings: Int, left: Int, right: Int) -> [Bool] {
+            var shown = [Bool](repeating: false, count: entries.count)
+            var leftUsed = 0, rightUsed = 0, total = 0
+            for index in entries.indices {
+                guard total < rings else { break }
+                if sides[index] == .left {
+                    guard leftUsed < left else { continue }
+                    leftUsed += 1
+                } else {
+                    guard rightUsed < right else { continue }
+                    rightUsed += 1
+                }
+                shown[index] = true
+                total += 1
+            }
+            return shown
         }
-        let shown = capacity - 1
-        let hidden = Array(entries.dropFirst(shown))
-        var slots: [CompactSlot] = entries.prefix(shown).map { CompactSlot.provider($0) }
-        slots.append(.more(CompactMorePresentation(hidden: hidden)))
-        return CompactSlotPlan(slots: slots, selectedCount: entries.count,
-                               hiddenProviderIDs: hidden.map { $0.provider })
+
+        var shown = choose(rings: budget, left: leftLimit, right: rightLimit)
+        var moreSide: CompactWingSide?
+        if shown.contains(false) {
+            // One slot of the single budget goes to More, on the wing of the first hidden provider.
+            let probe = choose(rings: budget - 1, left: leftLimit, right: rightLimit)
+            var side = sides[probe.firstIndex(of: false) ?? 0]
+            // More is a real control too: only a wing with genuinely zero physical room hands it to
+            // the other wing. Provider rings themselves are never moved.
+            if side == .left, leftLimit == 0 { side = .right }
+            else if side == .right, rightLimit == 0 { side = .left }
+            shown = choose(rings: budget - 1,
+                           left: leftLimit - (side == .left ? 1 : 0),
+                           right: rightLimit - (side == .right ? 1 : 0))
+            moreSide = side
+        }
+        let hidden = entries.indices.filter { !shown[$0] }.map { entries[$0] }
+        func wing(_ side: CompactWingSide) -> [CompactSlot] {
+            var result = entries.indices.filter { shown[$0] && sides[$0] == side }.map { CompactSlot.provider(entries[$0]) }
+            if moreSide == side { result.append(.more(CompactMorePresentation(hidden: hidden))) }
+            return result
+        }
+        return CompactSlotPlan(leftSlots: wing(.left), rightSlots: wing(.right),
+                               selectedCount: entries.count, hiddenProviderIDs: hidden.map { $0.provider })
     }
 }

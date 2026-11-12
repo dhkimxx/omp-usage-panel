@@ -629,12 +629,17 @@ final class ProviderScopeButton: ActionButton {
 
     /// `selected == nil` is the overview: no scope is chosen and the control reads "Providers".
     func update(providers: [DetailProvider], selected: DetailScope?) {
+        let changed = self.providers.map { $0.scope } != providers.map { $0.scope }
+            || self.providers.map { $0.label } != providers.map { $0.label } || selectedScope != selected
         self.providers = providers
         selectedScope = selected
         let current = selected.flatMap { scope in providers.first(where: { $0.scope == scope })?.label } ?? "Providers"
         if title != current { title = current }
         toolTip = current
         setAccessibilityValue(current)
+        if changed && DropdownPopupController.shared.isPresented(for: self) {
+            if providers.isEmpty { DropdownPopupController.shared.dismiss(for: self) } else { present() }
+        }
     }
 
     /// Width for the full title plus symmetric chevron reservations, clamped to `maximum`.
@@ -643,23 +648,47 @@ final class ProviderScopeButton: ActionButton {
     }
 
     @objc private func pressed() {
-        let menu = NSMenu(title: "Provider filter")
-        for provider in providers {
-            let item = NSMenuItem(title: provider.label, action: #selector(chosen(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = provider.scope
-            item.state = provider.scope == selectedScope ? .on : .off
-            menu.addItem(item)
+        let controller = DropdownPopupController.shared
+        if controller.isPresented(for: self) {
+            controller.dismiss(for: self)
+            return
         }
-        menuTrackingChanged?(true)
-        defer { menuTrackingChanged?(false) }
-        // Buttons are flipped: the menu's top-left corner sits just below the control.
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.maxY + 4), in: self)
+        guard !providers.isEmpty, window != nil, !isHiddenOrHasHiddenAncestor else { return }
+        present()
     }
 
-    @objc private func chosen(_ item: NSMenuItem) {
-        guard let scope = item.representedObject as? DetailScope else { return }
-        choose?(scope)
+    private func present() {
+        let selected = selectedScope
+        let items = providers.map { provider -> DropdownItem in
+            let scope = provider.scope
+            switch scope {
+            case .allAccounts:
+                return DropdownItem(id: "scope:all", title: provider.label, mark: "All",
+                                    isSelected: scope == selected) { [weak self] in self?.choose?(scope) }
+            case .provider(let id):
+                return DropdownItem(id: "scope:provider:" + Data(id.utf8).map { String(format: "%02x", $0) }.joined(),
+                                    title: provider.label, subtitle: id,
+                                    mark: CompactMark.monogram(provider: id, label: provider.label),
+                                    isSelected: scope == selected) { [weak self] in self?.choose?(scope) }
+            }
+        }
+        DropdownPopupController.shared.show(anchor: self, items: items,
+                                            trackingChanged: { [weak self] in self?.menuTrackingChanged?($0) })
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow !== window { DropdownPopupController.shared.dismiss(for: self) }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidHide() {
+        DropdownPopupController.shared.dismiss(for: self)
+        super.viewDidHide()
+    }
+
+    override func removeFromSuperview() {
+        DropdownPopupController.shared.dismiss(for: self)
+        super.removeFromSuperview()
     }
 }
 

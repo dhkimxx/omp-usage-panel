@@ -22,10 +22,13 @@ The app is installed to `~/Applications/OMP Usage.app` with its own copy of the 
 
 ## Use
 
-- On a notched screen, compact provider rings sit beside the camera. Otherwise the panel floats below the menu bar.
+- On a notched screen, compact provider rings sit on either side of the camera, as chosen per provider. Otherwise a single capsule floats below the menu bar.
 - Hover anywhere on the compact panel—including provider rings and floating mode—to preview the overview. Click a ring, or a provider card in the overview, for that provider's details. Use the overview header's **Providers** dropdown to choose **All** or one provider; the detail view has the same provider filter at the start of its account row, with **Overview** to go back. **More** opens the overview. **Escape** or an outside click collapses it.
 - **All** and the provider list come from the full collected catalog, including providers hidden from the summary cards or currently unavailable. The account picker remains available, and original limits and details are retained; these selections only change what is displayed and never change credentials.
-- **Options** (or right-click): Settings…, compact settings, refresh, open data folder, reset position, quit.
+- The **Providers** and **Account** pickers open a custom dark list panel (not a native menu): each row shows the provider mark, title and subtitle, with a check on the current selection and unavailable choices marked. Use the mouse, **↑/↓**, **Home/End**, **Return/Space**; **Escape** or an outside click closes only the list, and clicking the opener again toggles it. The panel stays open-tracking so the compact panel and updates do not collapse or restart underneath it.
+- Settings ID fields (**Providers**, **Labels**, **Metrics**) are ordinary editable text fields with the same custom suggestion list, opened from the chevron or **↓**. Any exact ID can still be typed; nothing is completed unasked. The list never interferes with native editing, IME composition, selection, undo or clipboard shortcuts; keys are only intercepted while the list is open for that field and not composing. **Escape** closes the list before Settings, and picking a suggestion updates the staged draft only.
+- OS file dialogs and the **Options**/right-click command menus remain native.
+- **Options** (or right-click): Settings…, refresh, open data folder, reset position, quit.
 - **Option-drag** to move the panel; **Reset position** restores automatic placement.
 - The summary is the highest single observed utilization, not an account total. Unknown values are not zero.
 
@@ -35,20 +38,23 @@ The app is installed to `~/Applications/OMP Usage.app` with its own copy of the 
 launchctl kickstart -k "gui/$(id -u)/com.dhkim.omp-usage-panel"
 ```
 
-### Compact display
+### Compact view
 
-Open **Options → Compact settings…** to choose providers, the left/right camera side and **Maximum slots** (default `3`).
+Open **Settings → Display → Compact view** to choose which providers appear, set each provider's **Left** or **Right** side of the camera, and set one **Maximum slots** total (default `3`). Changes are staged and apply on **Save & Apply**.
 
-- Selection is independent of the slot cap. **More uses the last slot**: five selected providers with three slots show two rings and **+3**.
+- Selection is independent of the slot cap. The maximum is shared across both wings and includes the single aggregate **More** control: five selected providers with three slots show two rings and **+3**. **More** lists every hidden provider, including ones assigned to the other side.
+- A provider is never moved to the opposite side to fit. Each wing is also limited by the physical space beside the camera.
+- Moving a provider directly between the left and right wings keeps its ring: both wings' old rings are detached before any are re-attached, and an already detached ring is repaired on the next update.
 - These choices affect only the compact display, not collection, authentication or the expanded dashboard.
-- Changes save automatically per configuration path and omp profile, and survive restarts/reinstallation. Clearing every provider leaves a **+** settings button.
-- Screen bounds may reduce the effective cap. App/status-menu occupancy is not detected; reduce the count or switch sides if menus overlap.
+- Preferences are saved per configuration path and omp profile and survive restarts/reinstallation; older single-side settings are migrated. Clearing every provider leaves a **+** button that opens Settings → Display.
+- Without a notch (or when the panel is moved), rings form one contiguous capsule below the menu bar, left group then right group, with no camera gap.
+- Screen bounds may reduce the effective cap. App/status-menu occupancy is not detected; reduce the count or change sides if menus overlap.
 
 ## Configuration
 
-Open **Options → Settings…** to edit the configuration in a native window with tabs for **Collection**, **Display**, **Providers**, **Labels**, **Metrics** and **Runtime**. **Save & Apply** validates and writes the file privately and atomically, then restarts collection in place—no app restart needed. **Cancel** or closing the window discards your edits. A profile change clears the previous profile's displayed data and uses that profile's compact preferences. API keys and authentication are not edited here; they stay managed by omp.
+Open **Options → Settings…** (the single Settings window; configure/**+** in the compact panel opens it directly at **Display**) to edit the configuration in a dark, custom-styled window with sections for **Collection**, **Display**, **Providers**, **Labels**, **Metrics**, **Runtime** and **Updates**. Edits are staged: **Save & Apply** validates everything, writes the file privately and atomically, saves any changed compact-view preferences, then restarts collection in place—no app restart needed. **Cancel** or closing the window discards all staged edits, including compact ones. If the config save fails, nothing else is applied and your draft stays open. Changing the profile clears the previous profile's displayed data; compact preferences are scoped per configuration path and omp profile, so each edited profile shows and saves its own. API keys and authentication are not edited here; they stay managed by omp.
 
-**Compact settings…** is separate and still saves automatically. The file is `~/Library/Application Support/omp-usage-panel/config.json`; editing it by hand still needs the restart above. Do not put API keys in it.
+The file is `~/Library/Application Support/omp-usage-panel/config.json`; editing it by hand still needs the restart above. Do not put API keys in it.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -90,7 +96,7 @@ The public update key and feed (`updates/appcast.xml`) are already configured an
 1. Choose the next version with `npm version <next-version> --no-git-tag-version` (the root `package.json` is the single version source; this keeps the lockfile in sync), then commit and push it to a clean `main`.
 2. Publishing needs the existing local Keychain key that matches the committed public key. `release:setup` only establishes a brand-new update channel and is not part of this flow; running it elsewhere would create a key that does not match the pinned public key. If that key is unavailable, signed updates cannot be published until the original key is restored through an OS-supported secure migration.
 3. `npm run release:package -- --output <dir> --notes-file <file>` (both flags optional) builds a signed universal package from a `git archive` of the pinned clean `HEAD`. A dirty local package cannot be published.
-4. `npm run release:publish -- --notes-file <file> [--dry-run]` requires clean `main` equal to the remote and uploads assets before the feed. `--dry-run` verifies everything without publishing, using only temporary extraction.
+4. `npm run release:publish -- --notes-file <file> [--dry-run]` requires clean `main` equal to the remote and uploads assets before the feed. `--dry-run` performs preflight and authentication of the existing package without publishing, using only temporary extraction; it is not proof of installation, and does not establish notarization.
 
 Sparkle 2.10.1 (pinned) is bundled for updates; see its license terms.
 

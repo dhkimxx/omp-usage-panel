@@ -42,12 +42,15 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private let configStore: PanelConfigStore
     private var collector: Collector
     private let panel: UsagePanel
-    private let compactContent = NSView()
-    private var compactItems: [NSView] = []
+    // Two independent content rows share the single fused root; each moves as one unit like the former single row.
+    private let compactLeftContent = NSView()
+    private let compactRightContent = NSView()
+    private lazy var compactRows = CompactRowReconciler(left: compactLeftContent, right: compactRightContent)
+    private var compactLeftItems: [NSView] { compactRows.leftItems }
+    private var compactRightItems: [NSView] { compactRows.rightItems }
     private var compactNeedsLayout = true
     private let dashboard = DashboardView()
     private var compactStore: CompactPreferencesStore
-    private let settings = CompactSettingsWindowController()
     private let generalSettings = GeneralSettingsWindowController()
     // One coordinator for the whole app lifetime (owned by AppDelegate). It is independent of `generation`:
     // usage configuration changes never recreate it or reset its policy.
@@ -58,9 +61,8 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private var compactCollecting = false
     private var compactRevision = 0
     private var compactPlanRevision = -1
-    private var compactPlanCapacity = 0
-    private var compactPlan = CompactSlotPlan(slots: [], selectedCount: 0, hiddenProviderIDs: [])
-    private var activeSide: CompactWingSide = .right
+    private var compactPlanCapacities: CompactCapacities?
+    private var compactPlan = CompactSlotPlan(leftSlots: [], rightSlots: [], selectedCount: 0, hiddenProviderIDs: [])
     private var realizedLayout: DockLayout?
     private let root = DockRootView()
     private let detail = ProviderDetailView()
@@ -95,6 +97,9 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private let positionKey = "dockTopCenter"
     private let legacyPositionKey = "panelPosition"
     private var updateReevaluationQueued = false
+    // True while a Settings suggestion list is open. It only gates updater cutover; it never touches DockInteraction,
+    // panel geometry or hover, so the compact notch stays compact behind Settings.
+    private var settingsDropdownOpen = false
 
     init(configStore: PanelConfigStore, updater: UpdaterCoordinator) {
         let config = configStore.config
@@ -117,10 +122,12 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         dashboard.menuTrackingChanged = { [weak self] in self?.menuTrackingChanged($0) }
         dashboard.refresh = { [weak self] in self?.refresh(force: true) }
         dashboard.optionsMenu = { [weak self] in self?.menu() ?? NSMenu() }
-        settings.preferencesChanged = { [weak self] in self?.compactPreferencesChanged($0) }
-        generalSettings.saveRequested = { [weak self] candidate, policy in
+        generalSettings.saveRequested = { [weak self] commit in
             guard let self = self else { return }
-            try self.saveGeneralSettings(candidate, policy)
+            try self.saveSettings(commit)
+        }
+        generalSettings.compactSnapshotRequested = { [weak self] profile in
+            self?.compactSnapshot(profile: profile) ?? CompactSettingsSnapshot(preferences: CompactPreferences(), providers: [])
         }
         generalSettings.checkRequested = { [weak self] in self?.updater.checkForUpdates() }
         generalSettings.installRequested = { [weak self] in self?.updater.installAvailableUpdate() }
@@ -142,7 +149,13 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         detail.refresh = { [weak self] in self?.refresh(force: true) }
         detail.optionsMenu = { [weak self] in self?.menu() ?? NSMenu() }
         detail.menuTrackingChanged = { [weak self] in self?.menuTrackingChanged($0) }
-        root.addSubview(dashboard); root.addSubview(detail); root.addSubview(compactContent); panel.contentView = root
+        generalSettings.dropdownTrackingChanged = { [weak self] active in
+            guard let self = self else { return }
+            self.settingsDropdownOpen = active
+            if !active { self.updateInteractionMayHaveReleased() }
+        }
+        root.addSubview(dashboard); root.addSubview(detail)
+        root.addSubview(compactLeftContent); root.addSubview(compactRightContent); panel.contentView = root
         panel.draggingChanged = { [weak self] active in self?.draggingChanged(active) }
         panel.dragTo = { [weak self] origin in self?.dragTo(origin) }
         panel.dragAnchor = { [weak self] in self?.dragStartAnchor() }
@@ -151,9 +164,6 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
         bindCollector()
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
-        if let compactWindow = settings.window {
-            NotificationCenter.default.addObserver(self, selector: #selector(compactSettingsClosed), name: NSWindow.willCloseNotification, object: compactWindow)
-        }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sessionBecameActive), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 53, let self = self,
@@ -181,7 +191,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
     }
     func stop() {
-        settings.close(); generalSettings.close()
+        generalSettings.close()
         cancelHover()
         cancelFrameAnimation()
         refreshTimer?.invalidate(); clockTimer?.invalidate()
@@ -203,7 +213,6 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         keyMonitor = nil; localPointerMonitor = nil; globalPointerMonitor = nil
     }
     @objc private func screensChanged() { positionPanel() }
-    @objc private func compactSettingsClosed() { updateInteractionMayHaveReleased() }
     @objc private func sessionBecameActive() { screensChanged(); renderHeader() }
     @objc private func refreshAction() { refresh(force: true) }
     private func refresh(force: Bool = false, ignoringHolds: Bool = false) {
@@ -227,17 +236,39 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
             self.refresh()
         }
     }
-    private func saveGeneralSettings(_ candidate: PanelConfig, _ policy: UpdatePolicy) throws {
-        // Persist first: a validation or write failure throws here and leaves the running configuration untouched.
-        // The updater policy lives in a different store, so it is committed only after the configuration succeeded.
-        try configStore.save(candidate)
+    // One unified commit. Order is deliberate so a failure never leaves a half-applied state:
+    // 1. every compact draft is validated and pre-encoded (nothing is written yet);
+    // 2. the configuration file is replaced atomically (a no-op when unchanged); a throw here leaves
+    //    preferences, runtime and policy untouched and the caller keeps the draft open;
+    // 3. prepared compact defaults are written to their explicitly scoped stores (no throwing step remains);
+    // 4. the runtime adopts the configuration once, or just re-plans after a compact-only change;
+    // 5. the updater policy lives in a different store and is applied last.
+    private func saveSettings(_ commit: SettingsCommit) throws {
+        let path = configStore.configPath
+        let currentKey = CompactPreferencesStore.storageKey(configPath: path, profile: config.profile)
+        var staged: [(key: String, store: CompactPreferencesStore, prepared: PreparedCompactPreferences)] = []
+        for change in commit.compactChanges {
+            let key = CompactPreferencesStore.storageKey(configPath: path, profile: change.profile)
+            // The running store receives its own scope so memory and defaults never diverge.
+            let store = key == currentKey ? compactStore : CompactPreferencesStore(configPath: path, profile: change.profile)
+            let prepared = try store.prepare(change.preferences)
+            if let index = staged.firstIndex(where: { $0.key == key }) { staged[index] = (key, store, prepared) }
+            else { staged.append((key, store, prepared)) }
+        }
+        try configStore.save(commit.config)
+        for entry in staged { entry.store.savePrepared(entry.prepared) }
         let committed = configStore.config
         if committed != config {
             let nodeChanged = committed.nodePath != config.nodePath
             applyConfiguration(committed)
             if nodeChanged { updater.updateRuntime(config: committed, configPath: configStore.configPath) }
+        } else if staged.contains(where: { $0.key == currentKey }) {
+            // Compact-only: keep the collector, result and detail state; only plans and views are refreshed.
+            compactRevision += 1
+            updateSettingsCatalog()
+            renderHeader()
         }
-        if policy != updater.policy { updater.applyPolicy(policy) }
+        if commit.updatePolicy != updater.policy { updater.applyPolicy(commit.updatePolicy) }
     }
     // Synchronous main-thread transition to a freshly committed configuration. Nothing from the previous one
     // (collector, queued timer fire, result, selection, disclosure, tooltip or catalog) survives it, and no
@@ -247,8 +278,6 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         let path = configStore.configPath
         let profileScopeChanged = CompactPreferencesStore.storageKey(configPath: path, profile: config.profile)
             != CompactPreferencesStore.storageKey(configPath: path, profile: next.profile)
-        // End an in-progress compact edit while the previous profile's store still receives it.
-        if profileScopeChanged { settings.finishEditingForProfileChange() }
         generation += 1
         refreshTimer?.invalidate(); refreshTimer = nil
         collector.completion = nil
@@ -321,19 +350,18 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         positionPanel(animated: animated)
     }
     // Re-plans only when content, preferences or physical capacity changed (never per paint/hover).
-    // Returns the number of compact controls the layouts must accommodate.
-    private func updateCompactPlan(capacity: Int) -> Int {
-        if compactPlanRevision != compactRevision || compactPlanCapacity != capacity || compactItems.isEmpty {
-            let preferences = compactStore.preferences
-            let plan = CompactSlotPlanner.plan(cards: compactCards, selectedProviderIDs: preferences.selectedProviderIDs,
-                                               maximumVisibleSlots: preferences.maximumVisibleSlots,
-                                               physicalCapacity: capacity, aliases: config.labels,
+    // Returns the actual number of compact controls on each wing (either may be zero) for the layouts.
+    private func updateCompactPlan(capacities: CompactCapacities) -> (left: Int, right: Int) {
+        if compactPlanRevision != compactRevision || compactPlanCapacities != capacities
+            || (compactLeftItems.isEmpty && compactRightItems.isEmpty) {
+            let plan = CompactSlotPlanner.plan(cards: compactCards, preferences: compactStore.preferences,
+                                               physicalCapacity: capacities, aliases: config.labels,
                                                issue: compactIssue, collecting: compactCollecting)
-            compactPlanRevision = compactRevision; compactPlanCapacity = capacity
+            compactPlanRevision = compactRevision; compactPlanCapacities = capacities
             compactPlan = plan
             rebuildCompactViews()
         }
-        return max(1, compactPlan.slots.count)
+        return (compactPlan.leftSlots.count, compactPlan.rightSlots.count)
     }
     private func rebuildCompactViews() {
         func configured<T: DockButton>(_ button: T, _ action: Selector) -> T {
@@ -342,37 +370,37 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
             return button
         }
         var next: [String: NSView] = [:]
-        var ordered: [NSView] = []
-        for slot in compactPlan.slots {
-            let view: NSView
-            switch slot {
-            case .provider(let presentation):
-                let button = (compactViews[slot.key] as? CompactRingButton)
-                    ?? configured(CompactRingButton(frame: .zero), #selector(openProvider(_:)))
-                button.update(presentation); view = button
-            case .more(let presentation):
-                let button = (compactViews[slot.key] as? CompactMoreButton)
-                    ?? configured(CompactMoreButton(frame: .zero), #selector(openOverview))
-                button.update(presentation); view = button
-            case .configure(let presentation):
-                let button = (compactViews[slot.key] as? CompactConfigureButton)
-                    ?? configured(CompactConfigureButton(frame: .zero), #selector(openCompactSettings))
-                button.update(presentation); view = button
+        func views(for slots: [CompactSlot]) -> [NSView] {
+            slots.map { slot in
+                let view: NSView
+                switch slot {
+                case .provider(let presentation):
+                    let button = (compactViews[slot.key] as? CompactRingButton)
+                        ?? configured(CompactRingButton(frame: .zero), #selector(openProvider(_:)))
+                    button.update(presentation); view = button
+                case .more(let presentation):
+                    let button = (compactViews[slot.key] as? CompactMoreButton)
+                        ?? configured(CompactMoreButton(frame: .zero), #selector(openOverview))
+                    button.update(presentation); view = button
+                case .configure(let presentation):
+                    let button = (compactViews[slot.key] as? CompactConfigureButton)
+                        ?? configured(CompactConfigureButton(frame: .zero), #selector(openDisplaySettings))
+                    button.update(presentation); view = button
+                }
+                next[slot.key] = view
+                return view
             }
-            next[slot.key] = view; ordered.append(view)
         }
+        let left = views(for: compactPlan.leftSlots)
+        let right = views(for: compactPlan.rightSlots)
         compactViews = next
-        if compactItems.count != ordered.count || !zip(compactItems, ordered).allSatisfy({ $0.0 === $0.1 }) {
-            compactItems.forEach { $0.removeFromSuperview() }
-            ordered.forEach { compactContent.addSubview($0) }
-        }
-        compactItems = ordered
+        // Views keep their identity across data refreshes; the reconciler compares the ACTUAL hierarchy and detaches
+        // both wings' stale children before attaching, so a direct side change cannot orphan a reparented view.
+        compactRows.apply(left: left, right: right)
         compactNeedsLayout = true
     }
-    // Provider exposure choices: every current provider, then selected IDs the data lacks.
-    // Runs on every accepted result, independent of render holds.
-    private func updateSettingsCatalog() {
-        let preferences = compactStore.preferences
+    // Live provider exposure choices: every current provider, then selected IDs the data lacks.
+    private func liveCompactChoices(for preferences: CompactPreferences) -> [CompactProviderChoice] {
         var known = Set<String>()
         var choices: [CompactProviderChoice] = []
         for summary in result?.summaries ?? [] where known.insert(summary.provider).inserted {
@@ -390,13 +418,27 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
                 detail: label == id ? "Not in the current usage report" : "\(id) · Not in the current usage report",
                 isReported: false))
         }
-        settings.update(preferences: preferences, providers: choices)
+        return choices
     }
-    private func compactPreferencesChanged(_ preferences: CompactPreferences) {
-        compactStore.save(preferences)
-        compactRevision += 1
-        updateSettingsCatalog()
-        renderHeader()
+    // Read-only snapshot for the profile being edited. Only the running profile's scope may borrow live usage;
+    // any other scope shows its saved preferences with neutral saved-ID rows, never another profile's data.
+    private func compactSnapshot(profile: String) -> CompactSettingsSnapshot {
+        let path = configStore.configPath
+        if CompactPreferencesStore.storageKey(configPath: path, profile: profile)
+            == CompactPreferencesStore.storageKey(configPath: path, profile: config.profile) {
+            let preferences = compactStore.preferences
+            return CompactSettingsSnapshot(preferences: preferences, providers: liveCompactChoices(for: preferences))
+        }
+        let preferences = CompactPreferencesStore(configPath: path, profile: profile).preferences
+        let providers = (preferences.selectedProviderIDs ?? []).map {
+            CompactProviderChoice(id: $0, label: $0, detail: "Saved selection · no usage shown for this profile", isReported: false)
+        }
+        return CompactSettingsSnapshot(preferences: preferences, providers: providers)
+    }
+    // Refreshes the open Settings window's saved baseline/catalog for the running profile. Runs on every accepted
+    // result, independent of render holds; unedited drafts follow it, edited fields never move.
+    private func updateSettingsCatalog() {
+        generalSettings.updateCompactSnapshot(compactSnapshot(profile: config.profile), profile: config.profile)
     }
     private func positionPanel(animated: Bool = false) {
         guard let screen = selectedScreen() else { return }
@@ -412,9 +454,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         let screenMetrics = metrics(screen)
         let bottom = max(screenMetrics.frame.minY, screenMetrics.visibleFrame.minY)
         let availableHeight = max(1, screenMetrics.frame.maxY - bottom)
-        let side = compactStore.preferences.side
-        activeSide = side
-        let slotCount = updateCompactPlan(capacity: DockGeometry.compactCapacity(screen: screenMetrics, side: side,
+        let slots = updateCompactPlan(capacities: DockGeometry.compactCapacities(screen: screenMetrics,
                                                                                  manualTopCenter: manualTopCenter))
         let overviewPreferred = DashboardSizing.preferredSize(providerCount: result?.summaries.count ?? 0, cameraHeight: 0)
         let detailPreferred = ProviderDetailView.preferredSize(availableHeight: availableHeight)
@@ -423,7 +463,8 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         func expandedLayout(preferred: NSSize, detail: Bool) -> DockLayout? {
             func make(_ size: NSSize) -> DockLayout? {
                 DockGeometry.layout(screen: screenMetrics, presentation: .expanded,
-                                    preferredExpandedSize: size, compactSlots: slotCount, side: side,
+                                    preferredExpandedSize: size, leftCompactSlots: slots.left,
+                                    rightCompactSlots: slots.right,
                                     manualTopCenter: manualTopCenter, preferredAnchorWidth: anchorWidth)
             }
             guard let initial = make(preferred) else { return nil }
@@ -441,7 +482,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
               let detailLayout = expandedLayout(preferred: detailPreferred, detail: true),
               let compact = DockGeometry.layout(screen: screenMetrics, presentation: .compact,
                                                  preferredExpandedSize: overviewPreferred,
-                                                 compactSlots: slotCount, side: side,
+                                                 leftCompactSlots: slots.left, rightCompactSlots: slots.right,
                                                  manualTopCenter: manualTopCenter, preferredAnchorWidth: anchorWidth) else {
             cancelFrameAnimation(); panel.orderOut(nil); return
         }
@@ -513,24 +554,33 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         currentLayout = requested; currentExpansion = expansion; self.detailBlend = detailBlend
         realizedLayout = layout
         root.mode = layout.mode; root.bodyRect = layout.bodyRect; root.cameraRect = layout.cameraRect; root.expansion = expansion
-        let slotCount = max(1, compactItems.count)
-        let rowHeight = min(CompactMetrics.rowHeight, layout.indicatorRect.height)
-        let rowSize = NSSize(width: CompactMetrics.contentWidth(slots: slotCount), height: rowHeight)
-        let needsLayout = compactNeedsLayout || compactContent.bounds.size != rowSize
-        let rowX = CompactMetrics.rowMinX(in: layout.indicatorRect, attached: layout.mode == .notchConnected,
-                                          side: activeSide, slots: slotCount)
-        compactContent.frame = NSRect(x: rowX, y: layout.indicatorRect.midY - rowHeight / 2,
-                                      width: rowSize.width, height: rowHeight)
-        if needsLayout {
-            for (index, view) in compactItems.enumerated() {
-                view.frame = NSRect(x: CGFloat(index) * CompactMetrics.slotPitch, y: 0,
-                                    width: CompactMetrics.ringDiameter, height: rowHeight)
+        let attached = layout.mode == .notchConnected
+        var relayout = compactNeedsLayout
+        // Each wing is one row at its own indicator rect inside the same fused root. An empty wing has no row.
+        func place(_ container: NSView, items: [NSView], rect: NSRect, side: CompactWingSide) {
+            guard !items.isEmpty else { container.frame = .zero; return }
+            let rowHeight = min(CompactMetrics.rowHeight, rect.height)
+            let rowSize = NSSize(width: CompactMetrics.contentWidth(slots: items.count), height: rowHeight)
+            let needsLayout = relayout || container.bounds.size != rowSize
+            let rowX = CompactMetrics.rowMinX(in: rect, attached: attached, side: side, slots: items.count)
+            container.frame = NSRect(x: rowX, y: rect.midY - rowHeight / 2, width: rowSize.width, height: rowHeight)
+            if needsLayout {
+                for (index, view) in items.enumerated() {
+                    view.frame = NSRect(x: CGFloat(index) * CompactMetrics.slotPitch, y: 0,
+                                        width: CompactMetrics.ringDiameter, height: rowHeight)
+                }
             }
-            compactNeedsLayout = false
         }
-        compactContent.alphaValue = max(0, 1 - expansion * 4)
+        place(compactLeftContent, items: compactLeftItems, rect: layout.leftIndicatorRect, side: .left)
+        place(compactRightContent, items: compactRightItems, rect: layout.rightIndicatorRect, side: .right)
+        relayout = false; compactNeedsLayout = false
+        let compactAlpha = max(0, 1 - expansion * 4)
         // Keep the initiating indicator alive until a pressed mouse is released.
-        compactContent.isHidden = expansion >= 1 && NSEvent.pressedMouseButtons & 1 == 0
+        let compactHidden = expansion >= 1 && NSEvent.pressedMouseButtons & 1 == 0
+        for (container, items) in [(compactLeftContent, compactLeftItems), (compactRightContent, compactRightItems)] {
+            container.alphaValue = compactAlpha
+            container.isHidden = compactHidden || items.isEmpty
+        }
         dashboard.frame = NSRect(x: layout.bodyRect.midX - dashboardSize.width / 2,
                                  y: layout.bodyRect.maxY - dashboardSize.height,
                                  width: dashboardSize.width, height: dashboardSize.height)
@@ -605,12 +655,13 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         manualTopCenter = origin
         positionPanel()
     }
-    // Where an Option-drag grabs the panel: the visible compact row's top-center when collapsed
-    // (an attached wing's frame midpoint is the camera+wing center, not the rings'), the frame's
-    // top-center otherwise. Evaluated from the realized layout before the drag hold is set.
+    // Where an Option-drag grabs the panel. Collapsed, the manual top-center is chosen so the grabbed wing's
+    // controls keep their global position when the two wings become one contiguous floating row (no camera-gap
+    // jump); expanded it is the frame's top-center. Evaluated from the realized layout before the drag hold is set.
     private func dragStartAnchor() -> NSPoint? {
         guard currentExpansion == 0, interaction.presentation == .compact, let layout = realizedLayout else { return nil }
-        return DockGeometry.compactDragAnchor(layout, side: activeSide, slots: compactItems.count)
+        return DockGeometry.compactDragAnchor(layout, grabPoint: NSEvent.mouseLocation,
+                                              leftSlots: compactLeftItems.count, rightSlots: compactRightItems.count)
     }
     @objc private func resetPosition() {
         UserDefaults.standard.removeObject(forKey: positionKey); UserDefaults.standard.removeObject(forKey: legacyPositionKey)
@@ -660,7 +711,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         cancelHover()
         let menu = NSMenu(title: "Usage options"); menu.delegate = self
         func item(_ title: String, _ action: Selector) { let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item) }
-        item("Refresh", #selector(refreshAction)); item("Settings…", #selector(openGeneralSettings)); item("Compact settings…", #selector(openCompactSettings)); item("Check for Updates…", #selector(openUpdates)); item("Open data folder", #selector(openData)); item("Reset position", #selector(resetPosition)); menu.addItem(.separator()); item("Quit", #selector(quit))
+        item("Refresh", #selector(refreshAction)); item("Settings…", #selector(openGeneralSettings)); item("Check for Updates…", #selector(openUpdates)); item("Open data folder", #selector(openData)); item("Reset position", #selector(resetPosition)); menu.addItem(.separator()); item("Quit", #selector(quit))
         return menu
     }
     func menuWillOpen(_ menu: NSMenu) {
@@ -675,17 +726,19 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         if active { positionPanel() }
         else { updatePointerAfterHold(); renderHeader(animated: true); updateInteractionMayHaveReleased() }
     }
-    @objc private func openCompactSettings() {
+    // The configure/+ control opens the one Settings window directly on Display.
+    @objc private func openDisplaySettings() {
         // A menu action runs before menu tracking has released its hold; present afterwards.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.updateSettingsCatalog()
+            self.generalSettings.edit(config: self.config, updatePolicy: self.updater.policy, result: self.result)
             self.dismiss()
-            self.settings.showWindow(nil)
+            self.generalSettings.showWindow(nil)
+            self.generalSettings.selectDisplayTab()
         }
     }
     @objc private func openGeneralSettings() {
-        // Same deferral as compact settings: menu tracking releases its hold before the panel is dismissed.
+        // Same deferral: menu tracking releases its hold before the panel is dismissed.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.generalSettings.edit(config: self.config, updatePolicy: self.updater.policy, result: self.result)
@@ -720,16 +773,14 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     // An unsolicited update notice appears only when nothing could be interrupted: no settings window (visible or
     // minimized), sheet, modal, menu, drag, mouse button, or expanded/animating panel.
     private var updateNoticeIsQuiet: Bool {
-        let compactSettingsInUse = settings.window.map { $0.isVisible || $0.isMiniaturized } ?? false
-        return !generalSettings.isInUse && !compactSettingsInUse && !anySheetOrModal
+        return !generalSettings.isInUse && !anySheetOrModal
             && !interaction.isMenuOpen && !interaction.isDragging && interaction.presentation == .compact
             && currentExpansion == 0 && frameAnimation == nil && NSEvent.pressedMouseButtons == 0
     }
-    // A deliberate Update Now must not drop edits: unsaved Settings changes, a compact settings window, a sheet,
-    // modal, menu or drag all refuse it. A clean open Settings window holds nothing to lose, so it stays usable.
+    // A deliberate Update Now must not drop edits: any unsaved Settings change (configuration, update choices or
+    // compact drafts), a sheet, modal, menu or drag refuses it. A clean open Settings window holds nothing to lose.
     private var updateInstallIsSafe: Bool {
-        let compactSettingsInUse = settings.window.map { $0.isVisible || $0.isMiniaturized } ?? false
-        return !generalSettings.hasUnsavedChanges && !compactSettingsInUse && !anySheetOrModal
+        return !generalSettings.hasUnsavedChanges && !anySheetOrModal && !settingsDropdownOpen
             && !interaction.isMenuOpen && !interaction.isDragging
     }
     // An automatic cutover has no user action behind it, so it needs the full presentation guard as well: any visible

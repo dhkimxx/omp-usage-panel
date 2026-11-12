@@ -30,9 +30,9 @@ private final class DetailText: NSTextField {
         if draggingPanel { draggingPanel = false; window?.mouseUp(with: event) }
         else { super.mouseUp(with: event) }
     }
-    func height(for width: CGFloat) -> CGFloat {
+    func height(for width: CGFloat, minimum: CGFloat = 18) -> CGFloat {
         guard width > 0 else { return 0 }
-        return max(18, ceil(cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: 100000)).height ?? 18))
+        return max(minimum, ceil(cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: 100000)).height ?? minimum))
     }
     // Natural single-line width from the configured font and the cell's own insets.
     var textWidth: CGFloat {
@@ -100,17 +100,18 @@ private final class DetailProgress: NSView {
     var model: DetailLimit?
     var now = Date()
     override func draw(_ dirtyRect: NSRect) {
-        let track = NSRect(x: 0, y: 3, width: bounds.width, height: 7)
+        // 10pt reservation: 6pt track centred on the 10pt pace marker.
+        let track = NSRect(x: 0, y: 2, width: bounds.width, height: 6)
         DockPalette.track.setFill()
-        NSBezierPath(roundedRect: track, xRadius: 3.5, yRadius: 3.5).fill()
+        NSBezierPath(roundedRect: track, xRadius: 3, yRadius: 3).fill()
         if let model, let percent = model.percent {
             DockPalette.usage(model.severity).setFill()
-            let filled = NSRect(x: 0, y: 3, width: bounds.width * min(1, max(0, percent / 100)), height: 7)
-            NSBezierPath(roundedRect: filled, xRadius: 3.5, yRadius: 3.5).fill()
+            let filled = NSRect(x: 0, y: 2, width: bounds.width * min(1, max(0, percent / 100)), height: 6)
+            NSBezierPath(roundedRect: filled, xRadius: 3, yRadius: 3).fill()
         }
         if let elapsed = model?.elapsed(now: now) {
             DockPalette.primaryText.setFill()
-            NSRect(x: max(0, min(bounds.width - 2, bounds.width * elapsed)), y: 0, width: 2, height: 13).fill()
+            NSRect(x: max(0, min(bounds.width - 2, bounds.width * elapsed)), y: 0, width: 2, height: 10).fill()
         }
     }
 }
@@ -171,13 +172,16 @@ private func styleDetailCard(_ view: NSView) {
 private struct DetailCardPlan {
     var frames: [(NSView, NSRect)] = []
     var height: CGFloat = 0
-    var sideBySide = true
+    var timingRight = false
+    var amountRight = false
+    var resetRight = false
 }
 
 private final class DetailLimitCard: DetailSurface {
     let model: DetailLimit
     let disclosure: DetailDisclosureButton
     var toggled: ((Bool) -> Void)?
+    var sizeChanged: (() -> Void)?
     private(set) var expanded: Bool
     private let heading: DetailText
     private let timing: DetailText
@@ -195,7 +199,7 @@ private final class DetailLimitCard: DetailSurface {
         self.expanded = expanded
         heading = DetailText(model.limit.label, size: 13, weight: .semibold)
         timing = DetailText(model.timing, size: 10, color: DockPalette.secondary)
-        value = DetailText(model.value, size: 30, weight: .semibold)
+        value = DetailText(model.value, size: 26, weight: .semibold)
         amount = DetailText(model.amount, size: 11, color: DockPalette.secondary)
         remaining = DetailText(model.remaining, size: 11, color: DockPalette.secondary)
         reset = DetailText(model.reset(now: now), size: 11, color: DockPalette.secondary)
@@ -231,51 +235,101 @@ private final class DetailLimitCard: DetailSurface {
         toggled?(expanded)
     }
 
+    // Content-sized layout: heading+timing share a row, value+amount share a row, the footer carries
+    // remaining, reset and the inline disclosure. Every text keeps its natural wrapped height.
     private func plan(width: CGFloat) -> DetailCardPlan {
         if cachedWidth == width { return cachedPlan }
         var plan = DetailCardPlan()
-        let inner = max(1, width - 32)
-        var y: CGFloat = 14
-        func full(_ view: NSView, _ height: CGFloat, gap: CGFloat) {
-            plan.frames.append((view, NSRect(x: 16, y: y, width: inner, height: height)))
+        let pad: CGFloat = 12, gutter: CGFloat = 10
+        let disclosureW: CGFloat = 70, disclosureH: CGFloat = 20
+        let inner = max(1, width - pad * 2)
+        var y: CGFloat = 10
+        func put(_ view: NSView, _ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) {
+            plan.frames.append((view, NSRect(x: x, y: y, width: w, height: h)))
+        }
+        func full(_ view: DetailText, gap: CGFloat) {
+            guard !view.stringValue.isEmpty else { put(view, pad, y, inner, 0); return }
+            let height = view.height(for: inner, minimum: 0)
+            put(view, pad, y, inner, height)
             y += height + gap
         }
-        full(heading, heading.height(for: inner), gap: 0)
-        full(timing, timing.height(for: inner), gap: 6)
-        plan.sideBySide = inner >= 240
-        let gutter: CGFloat = 12
-        if plan.sideBySide {
-            let valueWidth = min(inner * 0.55, value.textWidth)
+        // Heading and timing.
+        let hasTiming = !timing.stringValue.isEmpty
+        let timingNatural = hasTiming ? timing.textWidth : 0
+        if !hasTiming || heading.textWidth + gutter + timingNatural <= inner {
+            let headingWidth = hasTiming ? inner - timingNatural - gutter : inner
+            let headingHeight = heading.height(for: headingWidth, minimum: 0)
+            let timingHeight = hasTiming ? timing.height(for: timingNatural, minimum: 0) : 0
+            let row = max(headingHeight, timingHeight)
+            put(heading, pad, y, headingWidth, headingHeight)
+            put(timing, pad + inner - timingNatural, y + row - timingHeight, timingNatural, timingHeight)
+            plan.timingRight = hasTiming
+            y += row
+        } else {
+            full(heading, gap: 1)
+            full(timing, gap: 0)
+        }
+        y += 4
+        // Value and amount.
+        let sideBySide = inner >= 216
+        let hasAmount = !amount.stringValue.isEmpty
+        if sideBySide {
+            let valueWidth = hasAmount ? min(inner * 0.55, value.textWidth) : inner
             let amountWidth = max(1, inner - valueWidth - gutter)
-            let amountHeight = amount.height(for: amountWidth)
-            let row = max(39, amountHeight)
-            plan.frames.append((value, NSRect(x: 16, y: y, width: valueWidth, height: 39)))
-            plan.frames.append((amount, NSRect(x: 16 + valueWidth + gutter, y: y + row - amountHeight,
-                                               width: amountWidth, height: amountHeight)))
-            y += row + 8
+            let valueHeight = value.height(for: valueWidth, minimum: 0)
+            let amountHeight = hasAmount ? amount.height(for: amountWidth, minimum: 0) : 0
+            let row = max(valueHeight, amountHeight)
+            put(value, pad, y, valueWidth, valueHeight)
+            put(amount, pad + valueWidth + gutter, y + row - amountHeight, amountWidth, amountHeight)
+            plan.amountRight = true
+            y += row
         } else {
-            full(value, 39, gap: 6)
-            full(amount, amount.height(for: inner), gap: 8)
+            full(value, gap: hasAmount ? 2 : 0)
+            full(amount, gap: 0)
         }
-        plan.frames.append((progress, NSRect(x: 16, y: y, width: inner, height: 13)))
-        y += 21
-        if plan.sideBySide {
-            let half = max(1, (inner - gutter) / 2)
-            let left = remaining.height(for: half), right = reset.height(for: half)
-            plan.frames.append((remaining, NSRect(x: 16, y: y, width: half, height: left)))
-            plan.frames.append((reset, NSRect(x: 16 + half + gutter, y: y, width: half, height: right)))
-            y += max(left, right) + 6
+        y += 6
+        put(progress, pad, y, inner, 10)
+        y += 16
+        // Footer: remaining, reset and the disclosure share one row when they fit.
+        let hasRemaining = !remaining.stringValue.isEmpty, hasReset = !reset.stringValue.isEmpty
+        let remainingNatural = hasRemaining ? remaining.textWidth : 0
+        let resetNatural = hasReset ? reset.textWidth : 0
+        let items = CGFloat((hasRemaining ? 1 : 0) + (hasReset ? 1 : 0))
+        let disclosureX = pad + inner - disclosureW
+        if remainingNatural + resetNatural + disclosureW + gutter * items <= inner {
+            let remainingHeight = remaining.height(for: max(1, remainingNatural), minimum: 0)
+            let resetHeight = reset.height(for: max(1, resetNatural), minimum: 0)
+            let resetX = pad + (hasRemaining ? remainingNatural + gutter : 0)
+            let resetWidth = max(1, disclosureX - gutter - resetX)
+            put(remaining, pad, y + (disclosureH - remainingHeight) / 2, max(1, remainingNatural), remainingHeight)
+            put(reset, resetX, y + (disclosureH - resetHeight) / 2, resetWidth, resetHeight)
+            put(disclosure, disclosureX, y, disclosureW, disclosureH)
+            plan.resetRight = true
+            y += disclosureH
         } else {
-            full(remaining, remaining.height(for: inner), gap: 2)
-            full(reset, reset.height(for: inner), gap: 6)
+            let textWidth = inner - disclosureW - gutter
+            if textWidth >= 90 {
+                let remainingHeight = remaining.height(for: textWidth, minimum: 0)
+                let resetHeight = reset.height(for: textWidth, minimum: 0)
+                let block = remainingHeight + resetHeight + (hasRemaining && hasReset ? 1 : 0)
+                let row = max(block, disclosureH)
+                put(remaining, pad, y, textWidth, remainingHeight)
+                put(reset, pad, y + remainingHeight + (hasRemaining && hasReset ? 1 : 0), textWidth, resetHeight)
+                put(disclosure, disclosureX, y + (row - disclosureH) / 2, disclosureW, disclosureH)
+                y += row
+            } else {
+                // Too narrow to share a row without squeezing the text; the disclosure takes a slim row.
+                full(remaining, gap: 1)
+                full(reset, gap: 2)
+                put(disclosure, pad - 8, y, disclosureW, disclosureH)
+                y += disclosureH
+            }
         }
-        plan.frames.append((disclosure, NSRect(x: 10, y: y, width: 74, height: 24)))
-        y += 24
         if expanded {
-            y += 4
-            full(details, details.height(for: inner), gap: 0)
+            y += 6
+            full(details, gap: 0)
         }
-        plan.height = y + 12
+        plan.height = y + 10
         cachedWidth = width
         cachedPlan = plan
         return plan
@@ -285,12 +339,26 @@ private final class DetailLimitCard: DetailSurface {
         super.layout()
         let plan = plan(width: bounds.width)
         for (view, frame) in plan.frames { view.frame = frame }
-        let alignment: NSTextAlignment = plan.sideBySide ? .right : .left
-        if amount.alignment != alignment { amount.alignment = alignment; reset.alignment = alignment }
+        func align(_ text: DetailText, _ right: Bool) {
+            let alignment: NSTextAlignment = right ? .right : .left
+            if text.alignment != alignment { text.alignment = alignment }
+        }
+        align(timing, plan.timingRight)
+        align(amount, plan.amountRight)
+        align(reset, plan.resetRight)
     }
     func tick(now: Date) {
         let text = model.reset(now: now)
-        if reset.stringValue != text { reset.stringValue = text }
+        if reset.stringValue != text {
+            // The footer arrangement depends on the reset text's natural width; re-plan and tell the
+            // parent only when the card's height actually changed.
+            let width = bounds.width
+            let oldHeight = width > 0 ? plan(width: width).height : 0
+            reset.stringValue = text
+            cachedWidth = -1
+            needsLayout = true
+            if width > 0, plan(width: width).height != oldHeight { sizeChanged?() }
+        }
         progress.now = now
         progress.needsDisplay = true
         updateProgressAccessibility(now: now)
@@ -503,6 +571,9 @@ final class ProviderDetailView: NSView {
         accountButton.toolTip = next.selected?.menuTitle ?? "No account or unavailable report returned"
         accountButton.setAccessibilityValue(next.selected?.menuTitle ?? "No usage records")
         accountButton.isEnabled = next.choices.count > 1
+        if DropdownPopupController.shared.isPresented(for: accountButton) {
+            if next.choices.count > 1 { presentAccounts() } else { DropdownPopupController.shared.dismiss(for: accountButton) }
+        }
         countLabel.stringValue = next.countLabel
         countLabel.toolTip = next.countLabel
         statusLabel.stringValue = next.status
@@ -521,6 +592,7 @@ final class ProviderDetailView: NSView {
                 if expanded { self?.expandedLimits.insert(key) } else { self?.expandedLimits.remove(key) }
                 self?.needsLayout = true
             }
+            card.sizeChanged = { [weak self] in self?.needsLayout = true }
             return card
         }
         for card in cards { limitsDocument.addSubview(card) }
@@ -683,23 +755,58 @@ final class ProviderDetailView: NSView {
     @objc private func refreshPressed() { refresh?() }
     @objc private func closePressed() { close?() }
     @objc private func accountPressed() {
-        guard let content, content.choices.count > 1 else { return }
-        let menu = NSMenu(title: "Account selection")
-        for choice in content.choices {
-            let item = NSMenuItem(title: choice.menuTitle, action: #selector(accountChosen(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = choice.key
-            item.state = choice.key == content.selected?.key ? .on : .off
-            menu.addItem(item)
+        let controller = DropdownPopupController.shared
+        if controller.isPresented(for: accountButton) {
+            controller.dismiss(for: accountButton)
+            return
         }
-        menuTrackingChanged?(true)
-        defer { menuTrackingChanged?(false) }
-        // Buttons are flipped like their parent: the menu's top-left corner sits just below the control.
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: accountButton.bounds.maxY + 4), in: accountButton)
+        guard let content, content.choices.count > 1, window != nil, !isHiddenOrHasHiddenAncestor else { return }
+        presentAccounts()
     }
-    @objc private func accountChosen(_ item: NSMenuItem) {
-        guard let key = item.representedObject as? DetailAccountKey else { return }
-        selectAccount?(key)
+
+    private func presentAccounts() {
+        guard let content else { return }
+        let selected = content.selected?.key
+        let items = content.choices.map { choice -> DropdownItem in
+            let key = choice.key
+            let providerID: String
+            let id: String
+            switch key {
+            case .account(let provider, let accountID):
+                providerID = provider
+                id = "account:" + Self.framed(provider) + Self.framed(accountID)
+            case .unavailable(let provider, let label, let occurrence):
+                providerID = provider
+                id = "unavailable:" + Self.framed(provider) + Self.framed(label) + "\(occurrence)"
+            }
+            let subtitle = choice.providerLabel + (choice.unavailable == nil ? "" : " · unavailable report")
+            return DropdownItem(id: id, title: choice.label, subtitle: subtitle,
+                                mark: CompactMark.monogram(provider: providerID, label: choice.providerLabel),
+                                isSelected: key == selected) { [weak self] in self?.selectAccount?(key) }
+        }
+        DropdownPopupController.shared.show(anchor: accountButton, items: items,
+                                            trackingChanged: { [weak self] in self?.menuTrackingChanged?($0) })
+    }
+
+    /// Length-prefixed hex of the exact UTF-8 bytes, so no component value can shift a boundary.
+    private static func framed(_ value: String) -> String {
+        let bytes = Array(value.utf8)
+        return "\(bytes.count)#" + bytes.map { String(format: "%02x", $0) }.joined() + ";"
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow !== window { DropdownPopupController.shared.dismiss(for: accountButton) }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidHide() {
+        DropdownPopupController.shared.dismiss(for: accountButton)
+        super.viewDidHide()
+    }
+
+    override func removeFromSuperview() {
+        DropdownPopupController.shared.dismiss(for: accountButton)
+        super.removeFromSuperview()
     }
     @objc private func optionsPressed() {
         let local = optionsButton.convert(NSPoint(x: 0, y: optionsButton.bounds.maxY + 4), to: nil)

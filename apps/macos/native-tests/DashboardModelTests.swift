@@ -106,8 +106,10 @@ func runDashboardModelTests() {
     // providers, exact values, over-limit percentages, tooltips) is unchanged by it.
     let wide = content((0..<8).map { summary("provider\($0)", percent: $0 == 3 ? 104 : Double($0) * 10,
                                               value: $0 == 3 ? "104%" : "\($0 * 10)%") })
-    let compactPlan = CompactSlotPlanner.plan(cards: wide.cards, selectedProviderIDs: wide.cards.map { $0.provider },
-                                              maximumVisibleSlots: 2, physicalCapacity: 100)
+    let compactPlan = CompactSlotPlanner.plan(cards: wide.cards,
+                                              preferences: CompactPreferences(maximumVisibleSlots: 2,
+                                                                              selectedProviderIDs: wide.cards.map { $0.provider }),
+                                              physicalCapacity: CompactCapacities(left: 100, right: 100, total: 100))
     precondition(compactPlan.slots.count == 2 && compactPlan.hiddenProviderIDs.count == 7)
     precondition(wide.cards.count == 8 && wide.footer.hasPrefix("8 providers"))
     precondition(wide.cards[3].percent == 104 && wide.cards[3].tooltip.contains("104%"))
