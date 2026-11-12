@@ -35,9 +35,37 @@
 - The recommended path is the documented source installer (`npm run macos:install`), which also bootstraps updates. Do not bypass quarantine.]]></description>
       <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v0.2.0/OMP-Usage-0.2.0.zip" length="2538700" type="application/octet-stream" sparkle:edSignature="JKiuZVviFx98IgrtVZBc7wEriZ0Vl2mvRCmxLXEf9xXxQLNmrX1Ul92l2c972v9VMtJolTuNx5w+W2XrqN2JAQ==" />
     </item>
+    <item>
+      <title>OMP Usage 0.2.1</title>
+      <pubDate>Thu, 12 Nov 2026 06:20:25 +0000</pubDate>
+      <sparkle:version>0.2.1</sparkle:version>
+      <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <omp:appTreeSHA256>5092d3547fca6f8758f101e90d4b139f19c8fe076f836348bc01241c46199e61</omp:appTreeSHA256>
+      <omp:sourceCommit>977da20a8dcbd36e661be7769d0cafb1526d1cce</omp:sourceCommit>
+      <description sparkle:descriptionFormat="plain-text"><![CDATA[## OMP Usage Panel 0.2.1
+
+### Multi-monitor stability
+- The default **System primary** display no longer depends on which monitor has focus, so the panel stops jumping between displays.
+- **Settings → Display → Panel placement → Monitor** (custom dropdown) can pin a connected physical monitor, identified by its display UUID.
+- If a pinned monitor is disconnected, the panel temporarily falls back to the System primary display, keeps your choice, and returns when the monitor reconnects.
+- The choice is staged with **Save & Apply** / **Cancel**. Changing placement only does not reset the collector or other configuration.
+- A manual anchor stays on the same monitor across ordinary refresh, clamping, rearranging and disconnect/reconnect, without clamped positions overwriting it.
+- Deliberately saving a different monitor clears the manual position override. **Reset position** also clears the override but keeps the monitor selection.
+- Existing manual position data is retained or migrated on upgrade and startup, not reset.
+
+### Updates
+- Checks run roughly daily when enabled, not by immediate push; existing check, notification and automatic-installation choices are preserved.
+- Universal (arm64 + x86_64) ZIP, ad-hoc signed and Ed25519-authenticated; not Developer ID signed or notarized.
+- Source bootstrap is only needed for clients that do not yet have the updater.
+
+### Testing note
+Verified on a real built-in Retina display plus a DELL U2417H for monitor selection, Cancel, Save, relaunch and focus-independent placement. Disconnect/reconnect is covered by a deterministic model regression; physical cable hotplug was not exercised.]]></description>
+      <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v0.2.1/OMP-Usage-0.2.1.zip" length="2598606" type="application/octet-stream" sparkle:edSignature="fvNOpN5aTwPIQid47WEaneGsMGRAcVn8MPXSYAEPmpwUO8YjbFv5STK6JDELNm5SQarkGeFeDSYvfZIGLfeqCw==" />
+    </item>
   </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: fRFgEsxmF7/pry/dSpoF9UrxVXiQKftyDhputpqbzSJA+s3p7Wr4BiNTXNCYlKjmPmV595lAkWaXwTushOE4Dg==
-length: 4085
+edSignature: oCDPADO/hV1w7+d0vSp0JnsGqwtiETqlCToAuSdQtgKqFuewzvEQ+e9IpqYhoTpNKc1Uy+YnOkHFAuqpfTraAw==
+length: 6599
 -->
