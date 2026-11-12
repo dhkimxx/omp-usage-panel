@@ -8,9 +8,15 @@ final class Collector {
     private var stopped = false
     private let configPath: String
     private let config: PanelConfig
+    // Finder launches with a minimal PATH, so `#!/usr/bin/env node` omp wrappers need the configured Node and omp
+    // directories first. The config is immutable for this collector's lifetime (changes replace it); no shell is used.
+    private let childEnvironment: [String: String]
     var completion: ((Result<PanelResult, Error>) -> Void)?
 
-    init(configPath: String, config: PanelConfig) { self.configPath = configPath; self.config = config }
+    init(configPath: String, config: PanelConfig) {
+        self.configPath = configPath; self.config = config
+        childEnvironment = ChildEnvironment.environment(base: ProcessInfo.processInfo.environment, nodePath: config.nodePath, ompPath: config.ompPath)
+    }
     func collect(force: Bool = false) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !stopped else { return }
@@ -21,6 +27,7 @@ final class Collector {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: config.nodePath)
         task.arguments = [runtime, "--config", configPath] + (force ? ["--refresh"] : [])
+        task.environment = childEnvironment
         let stdout = Pipe(), stderr = Pipe()
         task.standardOutput = stdout; task.standardError = stderr
         process = task

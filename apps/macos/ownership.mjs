@@ -11,6 +11,11 @@ import path from 'node:path'
 /** @typedef {{kind:'d'}|{kind:'f', mode:number, size:number, digest:string}|{kind:'l', type:'d'|'f', target:string}} TreeEntry */
 
 export const label = 'com.dhkim.omp-usage-panel'
+/** A failure the setup protocol reports by `code`. The message is human-readable and never contains credentials. */
+export class InstallError extends Error {
+  /** @param {string} code @param {string} message @param {unknown} [cause] */
+  constructor(code, message, cause) { super(message, cause === undefined ? undefined : { cause }); this.name = 'InstallError'; this.code = code }
+}
 /** @param {string} file @param {string[]} args */
 export const runCommand = (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 /** @param {number} milliseconds */
@@ -101,6 +106,19 @@ export function atomic(file, content, mode = 0o600) {
     renameSync(temp, file); syncDirectory(path.dirname(file))
   } finally { rmSync(temp, { force: true }) }
 }
+/** Durably create `file` only when nothing exists there: it is linked into place, never renamed over an existing entry. Returns false
+ * when something appeared at `file` first, in which case that entry is left untouched.
+ * @param {string} file @param {string|Buffer} content @param {number} [mode] */
+export function createExclusive(file, content, mode = 0o600) {
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  const temp = path.join(path.dirname(file), `.omp-${randomUUID()}`)
+  try {
+    const fd = openSync(temp, 'wx', mode)
+    try { writeFileSync(fd, content); fsyncSync(fd) } finally { closeSync(fd) }
+    try { linkSync(temp, file) } catch (error) { if (/** @type {NodeJS.ErrnoException} */ (error).code === 'EEXIST') return false; throw error }
+    syncDirectory(path.dirname(file)); return true
+  } finally { rmSync(temp, { force: true }) }
+}
 /** Create or verify a real directory owned by `owner` and inaccessible to others. @param {string} directory @param {number} owner */
 export function ensurePrivateDirectory(directory, owner) {
   mkdirSync(directory, { recursive: true, mode: 0o700 })
@@ -149,8 +167,22 @@ export function preserveLegacyState(file, state) {
 }
 /** @param {string} s */
 function xml(s) { return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;') }
-/** @param {string} app @param {string} config */
-export function plist(app, config) { return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${label}</string><key>ProgramArguments</key><array><string>${xml(path.join(app, 'Contents/MacOS/OMPUsagePanel'))}</string><string>--config</string><string>${xml(config)}</string></array><key>RunAtLoad</key><true/></dict></plist>\n` }
+/** The job pins the account home explicitly, so it never depends on what launchd would otherwise provide.
+ * @param {string} app @param {string} config @param {string} home */
+export function plist(app, config, home) { return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${label}</string><key>ProgramArguments</key><array><string>${xml(path.join(app, 'Contents/MacOS/OMPUsagePanel'))}</string><string>--config</string><string>${xml(config)}</string></array><key>EnvironmentVariables</key><dict><key>HOME</key><string>${xml(home)}</string></dict><key>RunAtLoad</key><true/></dict></plist>\n` }
+/** @param {string} text */
+function unxml(text) { return text.replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&apos;', "'").replaceAll('&amp;', '&') }
+/** ProgramArguments of a LaunchAgent, read from its bytes; null when the file has none. @param {string} text @returns {string[]|null} */
+export function agentProgramArguments(text) {
+  const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1]
+  return block === undefined ? null : [...block.matchAll(/<string>([\s\S]*?)<\/string>/g)].map(match => unxml(match[1] ?? ''))
+}
+/** The LaunchAgent file must launch exactly this app with exactly this configuration, whatever generation of installer wrote it.
+ * @param {Context} c */
+export function checkAgentLaunch(c) {
+  const args = agentProgramArguments(readFileSync(c.agent, 'utf8')), program = path.join(c.app, 'Contents/MacOS/OMPUsagePanel')
+  if (!args || args.length !== 3 || args[0] !== program || args[1] !== '--config' || args[2] !== c.config) throw new InstallError('foreign-agent', `The LaunchAgent at ${c.agent} does not launch the managed app with the managed configuration`)
+}
 /** Start time of a process as ps reports it; pins a pid to one process instance. null when it cannot be determined.
  * @param {number} pid @returns {string|null} */
 export function defaultProcessStart(pid) {
@@ -188,7 +220,7 @@ function readLockOwner(file) {
  * world-writable ones such as /tmp). Anyone able to unlink the database could
  * split the kernel exclusion. @param {Context} c */
 function assertSafeStateRoot(c) {
-  const stat = lstatSync(c.stateDir), reject = () => new Error(`State directory is not a private real directory owned by this user: ${c.stateDir}`)
+  const stat = lstatSync(c.stateDir), reject = () => new InstallError('state-unsafe', `State directory is not a private real directory owned by this user: ${c.stateDir}`)
   if (!stat.isDirectory() || stat.uid !== c.owner || (stat.mode & 0o022) !== 0) throw reject()
   /** Resolve the route exactly as the kernel does, one component at a time and without lexical normalization: `..` applies to the
    * directory actually reached (after earlier links were followed), every directory that is entered must be modifiable only by this
@@ -233,9 +265,9 @@ function claimLegacyLock(c) {
   if (present(lock)) {
     const owner = readLockOwner(ownerFile)
     if (owner && typeof owner.pid === 'number' && Number.isInteger(owner.pid) && !sameProcess(c, owner.pid, typeof owner.start === 'string' ? owner.start : null)) rmSync(lock, { recursive: true, force: true })
-    else throw new Error(`Installer lock exists: ${lock}`)
+    else throw new InstallError('busy', `Installer lock exists: ${lock}`)
   }
-  try { mkdirSync(lock, { mode: 0o700 }) } catch (e) { if (/** @type {NodeJS.ErrnoException} */ (e).code === 'EEXIST') throw new Error(`Installer lock exists: ${lock}`); throw e }
+  try { mkdirSync(lock, { mode: 0o700 }) } catch (e) { if (/** @type {NodeJS.ErrnoException} */ (e).code === 'EEXIST') throw new InstallError('busy', `Installer lock exists: ${lock}`); throw e }
   try { writeFileSync(ownerFile, JSON.stringify({ pid: c.self, start: c.processStart(c.self), token }), { mode: 0o600 }) } catch (e) { rmSync(lock, { recursive: true, force: true }); throw e }
   return () => { if (readLockOwner(ownerFile)?.token === token) rmSync(lock, { recursive: true, force: true }) }
 }
@@ -253,7 +285,7 @@ export function withLock(c, action, waitMs = 0) {
     for (let attempt = 0; ; attempt++) {
       try { database.exec('BEGIN EXCLUSIVE'); break } catch (error) {
         if (!databaseBusy(error)) throw error
-        if (attempt >= attempts) throw new Error(`Installer lock exists: ${file}`)
+        if (attempt >= attempts) throw new InstallError('busy', `Installer lock exists: ${file}`)
         c.sleep(100)
       }
     }
@@ -263,11 +295,12 @@ export function withLock(c, action, waitMs = 0) {
     } finally { try { database.exec('ROLLBACK') } catch { /* The transaction ends with the connection. */ } }
   } finally { database.close() }
 }
-/** @param {Context} c @param {InstallState|null} state */
-export function checkOwned(c, state) {
-  if (state && (state.appPath !== c.app || state.agentPath !== c.agent)) throw new Error('Tracked installation uses different app or LaunchAgent paths')
-  if (present(c.app) && (!state || safeTreeHash(c.app, c.owner) !== state.appHash)) throw new Error(`Foreign or modified app at ${c.app}; refusing replacement`)
-  if (present(c.agent) && (!state || !lstatSync(c.agent).isFile() || lstatSync(c.agent).uid !== c.owner || digest(readFileSync(c.agent)) !== state.agentHash)) throw new Error(`Foreign or modified LaunchAgent at ${c.agent}; refusing replacement`)
+/** @param {Context} c @param {InstallState|null} state @param {{adopting?:boolean}} [options] `adopting` exempts the app at the destination: the caller
+ * has verified it is the very copy being adopted in place. Foreign LaunchAgents are never exempt. */
+export function checkOwned(c, state, options = {}) {
+  if (state && (state.appPath !== c.app || state.agentPath !== c.agent)) throw new InstallError('foreign-state', 'Tracked installation uses different app or LaunchAgent paths')
+  if (!options.adopting && present(c.app) && (!state || safeTreeHash(c.app, c.owner) !== state.appHash)) throw new InstallError('foreign-app', `Foreign or modified app at ${c.app}; refusing replacement`)
+  if (present(c.agent) && (!state || !lstatSync(c.agent).isFile() || lstatSync(c.agent).uid !== c.owner || digest(readFileSync(c.agent)) !== state.agentHash)) throw new InstallError('foreign-agent', `Foreign or modified LaunchAgent at ${c.agent}; refusing replacement`)
 }
 /** Whether launchd answered that the service does not exist. Any other failure is an inspection error, not absence. @param {unknown} error */
 export function serviceNotFound(error) {
@@ -289,19 +322,24 @@ export function loadedJob(c, state, options = {}) {
   const expectedProgram = path.join(c.app, 'Contents/MacOS/OMPUsagePanel')
   if (!state || !present(c.agent) || (options.appRequired !== false && !present(c.app)) || jobPath !== c.agent || program !== expectedProgram ||
       !args || args.length !== 3 || args[0] !== expectedProgram || args[1] !== '--config' || args[2] !== c.config) {
-    throw new Error(`Foreign or unverified loaded LaunchAgent ${label}; refusing to stop it`)
+    throw new InstallError('foreign-job', `Foreign or unverified loaded LaunchAgent ${label}; refusing to stop it`)
   }
   const pid = /^\s*pid = (\d+)$/m.exec(description)?.[1]
   return { state: /^\s*state = (.+)$/m.exec(description)?.[1]?.trim(), pid: pid === undefined ? undefined : Number(pid) }
 }
-/** Verify the loaded job and the owned files before stopping it. @param {Context} c @param {InstallState|null} state */
-export function ownedJobRunning(c, state) {
-  if (!loadedJob(c, state)) return false
-  checkOwned(c, state)
-  return true
+/** Verify the loaded job and the owned files. Returns the job, whose pid is present while a process is running, or null when no job is
+ * loaded. @param {Context} c @param {InstallState|null} state */
+export function ownedJob(c, state) {
+  const job = loadedJob(c, state)
+  if (job) checkOwned(c, state)
+  return job
 }
+/** Verify the loaded job and the owned files before stopping it. @param {Context} c @param {InstallState|null} state */
+export function ownedJobRunning(c, state) { return ownedJob(c, state) !== null }
 /** @param {Context} c */
 export function startJob(c) { c.run('/bin/launchctl', ['bootstrap', `gui/${c.uid}`, c.agent]) }
+/** Start a loaded job that is not running. Never `-k`: a running process is not killed. @param {Context} c */
+export function kickstartJob(c) { c.run('/bin/launchctl', ['kickstart', `gui/${c.uid}/${label}`]) }
 /** @param {Context} c */
 export function bootoutJob(c) { c.run('/bin/launchctl', ['bootout', `gui/${c.uid}/${label}`]) }
 /** @param {Context} c */

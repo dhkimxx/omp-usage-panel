@@ -6,7 +6,21 @@ It shows whichever providers and accounts your installed omp supports. Installin
 
 ## Install
 
-Requires macOS 13+, Node.js **22.18+**, and an authenticated omp that supports `omp usage --json`. Building also needs Xcode Command Line Tools (`swiftc`, `codesign`). Tested with omp 18.18.6.
+Requires macOS 13+, an existing Node.js **22.18+** and an authenticated omp that supports `omp usage --json` (tested with omp 18.18.6). Node and omp are not bundled or installed for you; no repository checkout or Swift compiler is needed.
+
+1. Download the DMG from the [latest GitHub release](https://github.com/dhkimxx/omp-usage-panel/releases/latest) and open it.
+2. Open **OMP Usage.app** from the DMG (or from Downloads).
+3. In the setup window, check the auto-detected Node and omp paths (edit or browse if needed; the omp profile is editable; an existing default config is detected automatically) and click **Install & Open**. Clicking Install also registers a per-user login LaunchAgent.
+
+There is no `/Applications` shortcut. The app copies itself, without admin rights, to the existing managed location `~/Applications/OMP Usage.app` (quarantine and extended attributes preserved), writes its configuration and LaunchAgent, then relaunches from there. Setup does not read, copy or change omp credentials or plugins; the dashboard itself calls `omp usage`, which uses omp's own authentication. An existing valid `config.json` is kept unchanged and its paths and profile are used; an invalid one is reported, not overwritten. Node and omp must stay at the paths in `config.json`.
+
+**Signing:** no Apple Developer ID is used. The app is ad-hoc/Ed25519-signed and not notarized, so macOS Gatekeeper may block the first downloaded copy before the app runs; the setup window cannot address that. This project gives no instructions to bypass quarantine.
+
+Later versions arrive through the in-app updater (see [Updates](#updates)). Managed launches (login startup, `--config`) skip setup.
+
+### Source install (advanced / development)
+
+Not needed for normal use. Requires Xcode Command Line Tools (`swiftc`, `codesign`):
 
 ```sh
 git clone https://github.com/dhkimxx/omp-usage-panel.git
@@ -16,9 +30,7 @@ npm run macos:install -- --dry-run   # preview
 npm run macos:install
 ```
 
-If omp is not discoverable, set `OMP_BIN=/absolute/path/to/omp` for the first install. Reinstalling keeps your existing configuration.
-
-The app is installed to `~/Applications/OMP Usage.app` with its own copy of the collector, so the checkout can be moved or deleted. Node and omp must stay at the paths in `config.json`. The source install is a one-time bootstrap; later versions arrive through the in-app updater (see [Updates](#updates)), not by reinstalling from source. The installed app is ad-hoc signed and not notarized.
+If omp is not discoverable, set `OMP_BIN=/absolute/path/to/omp`. Reinstalling keeps your existing configuration.
 
 ## Use
 
@@ -90,7 +102,7 @@ node packages/usage-core/cli.mjs --refresh  # runs `omp usage invalidate` first
 
 ## Updates
 
-After the one-time source install above, the app checks GitHub for new versions. Updates are prebuilt universal (arm64 + x86_64) apps downloaded from [GitHub Releases](https://github.com/dhkimxx/omp-usage-panel/releases); no Xcode or source build is needed for them. Node.js 22.18+ and omp are still required.
+After installation, the app checks GitHub for new versions. Updates are prebuilt universal (arm64 + x86_64) apps downloaded from [GitHub Releases](https://github.com/dhkimxx/omp-usage-panel/releases); no Xcode or source build is needed for them. Node.js 22.18+ and omp are still required.
 
 - **Defaults:** daily checks on, notifications on, automatic installation **off**.
 - **Settings → Updates** (app-wide, not per omp profile) holds these controls and uses the same **Save & Apply** / **Cancel** as the rest of Settings. **Check for Updates…** in the menu runs a manual check, which ignores Skip and turned-off notifications.
@@ -107,6 +119,8 @@ The public update key and feed (`updates/appcast.xml`) are already configured an
 2. Publishing needs the existing local Keychain key that matches the committed public key. `release:setup` only establishes a brand-new update channel and is not part of this flow; running it elsewhere would create a key that does not match the pinned public key. If that key is unavailable, signed updates cannot be published until the original key is restored through an OS-supported secure migration.
 3. `npm run release:package -- --output <dir> --notes-file <file>` (both flags optional) builds a signed universal package from a `git archive` of the pinned clean `HEAD`. A dirty local package cannot be published.
 4. `npm run release:publish -- --notes-file <file> [--dry-run]` requires clean `main` equal to the remote and uploads assets before the feed. `--dry-run` performs preflight and authentication of the existing package without publishing, using only temporary extraction; it is not proof of installation, and does not establish notarization.
+
+Release flow: `release:package` builds the single DMG and signed feed item; `release:publish` uploads the asset before the feed. Only after a real public SDK upgrade proof, run `npm run release:prune -- --keep-version <version>` to re-sign the feed with only the kept item. Delete older GitHub release objects only after the pruned feed is live; git tags are retained. `release:prune` never deletes GitHub releases itself.
 
 Sparkle 2.10.1 (pinned) is bundled for updates; see its license terms.
 

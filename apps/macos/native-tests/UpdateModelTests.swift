@@ -76,6 +76,18 @@ private func runCandidateTests() {
     precondition(candidate(properties: [:]).appTreeSHA256 == nil)
     precondition(candidate(url: "https://example.com/app.zip", informationOnly: false).isInstallable)
 
+    // A release DMG is an ordinary authenticated HTTPS candidate: the archive extension is never a gate (the old ZIP and the new DMG
+    // share one validation path), and every authentication fact is still required for it.
+    let dmgURL = "https://github.com/dhkimxx/omp-usage-panel/releases/download/v1.0.0/OMP-Usage-1.0.0.dmg"
+    let dmg = candidate(version: "1.0.0", url: dmgURL)
+    precondition(dmg.isInstallable && dmg.blockedReason == nil && dmg.appTreeSHA256 == goodHash && dmg.version == "1.0.0")
+    precondition(candidate(version: "1.0.0", url: dmgURL.uppercased().replacingOccurrences(of: "HTTPS", with: "https")).isInstallable, "scheme is what matters, not the file name")
+    precondition(!candidate(version: "1.0.0", signed: false, url: dmgURL).isInstallable && candidate(version: "1.0.0", signed: false, url: dmgURL).blockedReason!.contains("signature"), "unsigned DMG item is rejected")
+    precondition(candidate(version: "1.0.0", properties: [:], url: dmgURL).blockedReason!.contains("lacks"), "DMG item without the tree hash is rejected")
+    precondition(candidate(version: "1.0.0", properties: ["omp:appTreeSHA256": "xyz"], url: dmgURL).blockedReason!.contains("malformed"), "DMG item with a malformed hash is rejected")
+    precondition(!candidate(version: "1.0.0", url: dmgURL.replacingOccurrences(of: "https://", with: "http://")).isInstallable, "non-HTTPS DMG is rejected")
+    precondition(!candidate(version: "1.0.0", url: dmgURL, informationOnly: true).isInstallable)
+
     // Versions: digits, optional dotted parts and pre-release/build suffix; no shell/path material reaches the ownership helper.
     for version in ["0.2.0", "10.0", "1.2.3.4", "2.0.0-beta.1", "1.0.0+build.5", "7"] { precondition(UpdateCandidate.isValidVersion(version), version) }
     for version in ["", "v1.0", "1..2", "1.0 ", "1.0; rm -rf /", "../1.0", "1.0\n", "1.2.3.4.5", "-1"] { precondition(!UpdateCandidate.isValidVersion(version), version) }

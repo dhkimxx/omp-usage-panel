@@ -7,7 +7,7 @@ import { ensureSparkleSdk, readChannel, rootVersion, sourceRoot } from './sparkl
 export { sourceRoot }
 export const runtimeFiles = [
   ...['cli.mjs', 'collector.mjs', 'normalize.mjs', 'summary.mjs', 'index.mjs', 'package.json'].map(f => `packages/usage-core/${f}`),
-  ...['collect.mjs', 'config.mjs', 'uninstall.mjs', 'installation.mjs', 'build.mjs', 'ownership.mjs', 'update-transaction.mjs', 'update-ownership.mjs', 'sparkle.mjs', 'update-channel.json', 'package.json'].map(f => `apps/macos/${f}`),
+  ...['collect.mjs', 'config.mjs', 'uninstall.mjs', 'installation.mjs', 'build.mjs', 'ownership.mjs', 'update-transaction.mjs', 'update-ownership.mjs', 'setup-install.mjs', 'sparkle.mjs', 'update-channel.json', 'package.json'].map(f => `apps/macos/${f}`),
   'package.json',
 ]
 const deploymentTarget = '13.0'

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { copyFileSync, cpSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { parseConfig } from './config.mjs'
-import { appTreeHash, atomic, canonical, context, digest, ensurePrivateDirectory, executable, inspectInstaller, installerLabel, loadManifest, loadedJob, preserveLegacyState, present, safeTreeHash, sameEntries, removeIdleInstallerJobs, sameProcess, scanTree, startJob, stopJob, syncDirectory, syncTree, withLock } from './ownership.mjs'
+import { agentProgramArguments, appTreeHash, atomic, canonical, context, digest, ensurePrivateDirectory, executable, inspectInstaller, installerLabel, loadManifest, loadedJob, preserveLegacyState, present, safeTreeHash, sameEntries, removeIdleInstallerJobs, sameProcess, scanTree, startJob, stopJob, syncDirectory, syncTree, withLock } from './ownership.mjs'
 
 /** @typedef {import('./ownership.mjs').Context} Context */
 /** @typedef {import('./ownership.mjs').InstallState} InstallState */
@@ -20,6 +20,8 @@ import { appTreeHash, atomic, canonical, context, digest, ensurePrivateDirectory
 export const trustedRuntimeFiles = ['config.mjs', 'ownership.mjs', 'update-transaction.mjs', 'update-ownership.mjs']
 const runtimeDirectory = 'Contents/Resources/runtime/apps/macos'
 const recoveryHint = 'Resolve the problem, then run the OMP Usage updater recovery (update-ownership.mjs recover).'
+const setupRecovery = 'Open OMP Usage from the downloaded disk image to run its one-time setup.'
+const modifiedRecovery = 'Restore the original file, or move the modified one aside yourself, then open OMP Usage from the downloaded disk image to run its setup again. Setup never overwrites files it does not recognize.'
 const liveUpdateMessage = 'A prebuilt update is authorized or in progress and may still replace the app; wait for it, or cancel it from the running app, before installing or uninstalling'
 const hex64 = /^[a-f0-9]{64}$/
 const versionPattern = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/
@@ -286,27 +288,20 @@ function pendingReason(kind, receipt) {
   }
 }
 
-/** @param {string} text */
-function unescapeXml(text) { return text.replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&apos;', "'").replaceAll('&amp;', '&') }
-/** ProgramArguments of the on-disk LaunchAgent, read from its bytes. @param {string} text */
-function agentArguments(text) {
-  const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1]
-  return block === undefined ? null : [...block.matchAll(/<string>([\s\S]*?)<\/string>/g)].map(match => unescapeXml(match[1] ?? ''))
-}
 /** Verify this is a managed, same-user, unmodified installation that may be updated.
  * @param {Context} c */
 function verifyManaged(c) {
   if (c.platform !== 'darwin') throw new UpdateError('not-managed', 'Updates require macOS.')
   const state = readManifest(c)
-  if (!state) throw new UpdateError('not-managed', 'This copy of OMP Usage was not installed by the OMP Usage installer, so automatic updates are unavailable.', 'Reinstall with npm run macos:install from a source checkout.')
-  if (state.appPath !== c.app || state.agentPath !== c.agent) throw new UpdateError('not-managed', 'This app is not at the location recorded by the installer, so automatic updates are unavailable.', 'Reinstall with npm run macos:install from a source checkout.')
+  if (!state) throw new UpdateError('not-managed', 'This copy of OMP Usage was not installed by the OMP Usage installer, so automatic updates are unavailable.', setupRecovery)
+  if (state.appPath !== c.app || state.agentPath !== c.agent) throw new UpdateError('not-managed', 'This app is not at the location recorded by the installer, so automatic updates are unavailable.', setupRecovery)
   try { if (statSync(c.stateDir).uid !== c.owner) throw new Error('The state directory is owned by another user') } catch (error) { throw new UpdateError('ownership-mismatch', describe(error)) }
   /** @type {ReturnType<typeof scanTree>} */
   let scan
   try { scan = scanTree(c.app, { uid: c.owner }) } catch (error) { throw new UpdateError('ownership-mismatch', `The installed app cannot be verified: ${describe(error)}`) }
-  if (scan.hash !== state.appHash) throw new UpdateError('ownership-mismatch', 'The installed app differs from the installer ownership record, so it will not be replaced.', 'Reinstall with npm run macos:install from a source checkout.')
-  if (!present(c.agent) || !lstatSync(c.agent).isFile() || lstatSync(c.agent).uid !== c.owner || digest(readFileSync(c.agent)) !== state.agentHash) throw new UpdateError('ownership-mismatch', 'The LaunchAgent differs from the installer ownership record, so updates are unavailable.', 'Reinstall with npm run macos:install from a source checkout.')
-  const args = agentArguments(readFileSync(c.agent, 'utf8'))
+  if (scan.hash !== state.appHash) throw new UpdateError('ownership-mismatch', 'The installed app differs from the installer ownership record, so it will not be replaced.', modifiedRecovery)
+  if (!present(c.agent) || !lstatSync(c.agent).isFile() || lstatSync(c.agent).uid !== c.owner || digest(readFileSync(c.agent)) !== state.agentHash) throw new UpdateError('ownership-mismatch', 'The LaunchAgent differs from the installer ownership record, so updates are unavailable.', modifiedRecovery)
+  const args = agentProgramArguments(readFileSync(c.agent, 'utf8'))
   if (!args || args.length !== 3 || args[0] !== path.join(c.app, 'Contents/MacOS/OMPUsagePanel') || args[1] !== '--config' || args[2] !== c.config) throw new UpdateError('not-managed', 'This app was started with a configuration path that differs from the installed LaunchAgent, so automatic updates are unavailable.')
   /** @type {ReturnType<typeof loadedJob>} */
   let job

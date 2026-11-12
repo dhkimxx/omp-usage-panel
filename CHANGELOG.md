@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0
+
+- Distribute as a single DMG from GitHub Releases containing `OMP Usage.app` and a short `Install.txt`. There is no `/Applications` link: the app installs itself into the existing no-admin managed location `~/Applications/OMP Usage.app`.
+- Add a native first-run setup. Open the app from the DMG, Downloads or any copy; it detects Node.js 22.18+ and omp (including nvm), lets you edit the absolute paths or browse for them, edit the omp profile (an existing default config is detected automatically), and installs on an explicit **Install & Open**. Clicking Install consents to the per-user login LaunchAgent (RunAtLoad). Node and omp are never bundled or installed, and setup does not read, copy or change omp credentials or plugins.
+- Installation copies the app with its quarantine attribute, extended attributes and symlinks preserved, writes the configuration, ownership manifest and LaunchAgent, then hands off to a single canonical managed process. An existing valid configuration is kept byte-identical and remains authoritative; an invalid or unreadable one produces an error instead of being reset.
+- Launching the canonical managed app from Finder without arguments hands off to the registered job; managed launches with an explicit `--config` (including login startup and updater restarts) skip setup and use the normal fast path. A foreign destination, modified tracked app, foreign job or active update transaction is refused.
+- Existing users upgrade through the in-app updater with the same feed, signing key, bundle identity and transaction protocol; settings, update consent, monitor and compact preferences are preserved.
+- The app is ad-hoc/Ed25519-signed, not Developer ID signed or notarized. Gatekeeper may block the first download; the setup UI cannot influence a rejection that happens before the app runs.
+- Add maintainer `release:prune` to keep only one version in the signed feed. Source install remains an advanced development fallback.
+
 ## 0.2.1
 
 - Keep the usage panel on one stable monitor: the default **System primary** display no longer depends on which monitor has focus, so multi-monitor setups stop jumping between displays. **Settings → Display → Panel placement → Monitor** can instead pin a connected physical monitor (identified by its display UUID, not a transient ID). A pinned monitor that is unplugged is shown as unavailable, the panel temporarily uses the System primary display, and it returns when the monitor reconnects. Saving a different monitor resets a manual position; **Reset position** keeps the chosen monitor. The choice is app-wide, staged with **Save & Apply** / **Cancel**, and never changes macOS display settings. Older versions ignore the new preference and use their own placement.

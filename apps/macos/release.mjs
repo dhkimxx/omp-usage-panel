@@ -1,16 +1,18 @@
 import { createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { buildApp as buildWorkingApp } from './build.mjs'
+import { createDmg, withDmgApp } from './dmg.mjs'
 import { channelPath, defaults, ensureSparkleSdk, feedPath, readChannel, rootVersion, sourceRoot } from './sparkle.mjs'
 
 const usage = `Usage:
   node apps/macos/release.mjs setup [--public-key base64]
   node apps/macos/release.mjs package [--output directory] [--notes-file file]
-  node apps/macos/release.mjs publish --notes-file file [--dry-run]`
+  node apps/macos/release.mjs publish --notes-file file [--dry-run]
+  node apps/macos/release.mjs prune --keep-version MAJOR.MINOR.PATCH [--dry-run]`
 
 /**
  * @param {string} command @param {string[]} args @param {{cwd?: string, stdio?: import('node:child_process').StdioOptions}} [options]
@@ -61,19 +63,21 @@ function signFeed(sdk, file, publicEDKey) {
   verifyFeed(file, publicEDKey)
 }
 /** Feed signature covers every byte before the trailing sparkle-signatures comment. */
-/** @param {string} file @param {string} publicEDKey @returns {string} */
-function verifyFeed(file, publicEDKey) {
-  const text = readFileSync(file, 'utf8'), marker = text.lastIndexOf('<!-- sparkle-signatures:')
+/** @param {string} text @param {string} publicEDKey @param {string} label @returns {string} */
+export function verifyFeedText(text, publicEDKey, label) {
+  const marker = text.lastIndexOf('<!-- sparkle-signatures:')
   const match = marker < 0 ? null : /^<!-- sparkle-signatures:\s*edSignature: (\S+)\s*length: (\d+)\s*-->\s*$/.exec(text.slice(marker))
-  if (!match) throw new Error(`Feed is not signed: ${file}`)
+  if (!match) throw new Error(`Feed is not signed: ${label}`)
   const signed = Buffer.from(text.slice(0, marker))
-  if (signed.length !== Number(match[2]) || !verifySignature(signed, match[1], publicEDKey)) throw new Error(`Feed signature does not verify against the pinned public key: ${file}`)
+  if (signed.length !== Number(match[2]) || !verifySignature(signed, match[1], publicEDKey)) throw new Error(`Feed signature does not verify against the pinned public key: ${label}`)
   return text
 }
+/** @param {string} file @param {string} publicEDKey @returns {string} */
+export function verifyFeed(file, publicEDKey) { return verifyFeedText(readFileSync(file, 'utf8'), publicEDKey, file) }
 
 // ---------------------------------------------------------------- appcast
 /** @param {string} text */
-function feedItems(text) { return [...text.matchAll(/<item>[\s\S]*?<\/item>/g)].map(m => m[0]) }
+export function feedItems(text) { return [...text.matchAll(/<item>[\s\S]*?<\/item>/g)].map(m => m[0]) }
 /** @param {string} item */
 function itemVersion(item) {
   const match = /<sparkle:version>([^<]+)<\/sparkle:version>/.exec(item)
@@ -106,12 +110,12 @@ function appendRelease(feedText, release) {
   return renderFeed([...items, renderItem(release)])
 }
 export function emptyFeed() { return renderFeed([]) }
-/** @param {string} version */
-const archiveName = version => `OMP-Usage-${version}.zip`
+/** Public release asset: a read-only compressed DMG holding the app and an install note. @param {string} version */
+export const archiveName = version => `OMP-Usage-${version}.dmg`
 /** @param {string} version */
 const releaseTag = version => `v${version}`
 /** @param {string} version */
-const downloadURL = version => `https://github.com/${defaults.repository}/releases/download/${releaseTag(version)}/${archiveName(version)}`
+export const downloadURL = version => `https://github.com/${defaults.repository}/releases/download/${releaseTag(version)}/${archiveName(version)}`
 /** @param {Date} date */
 const rfc822 = date => date.toUTCString().replace('GMT', '+0000')
 
@@ -141,6 +145,30 @@ function setup({ publicKey } = {}) {
     signFeed(sdk, feedPath, publicEDKey)
   } else verifyFeed(feedPath, publicEDKey)
   console.log(JSON.stringify({ channel: path.relative(sourceRoot, channelPath), feed: path.relative(sourceRoot, feedPath), publicEDKey }, null, 2))
+}
+
+/** @typedef {{signArchive: (file: string) => {signature: string, length: number}, signFeed: (file: string) => void}} Signer */
+/**
+ * Signer backed by the Keychain account through Sparkle's sign_update; every signature is verified in Node against the pinned key.
+ * @param {SparkleSdk} sdk @param {string} publicEDKey @returns {Signer}
+ */
+function keychainSigner(sdk, publicEDKey) { return { signArchive: file => signArchive(sdk, file, publicEDKey), signFeed: file => signFeed(sdk, file, publicEDKey) } }
+
+/**
+ * Builds the DMG from the built app, verifies it through a read-only mount, signs it and writes the candidate feed and release.json into `stage`.
+ * @param {{app: string, stage: string, version: string, notes: string, sourceCommit: string|undefined, currentFeed: string, appTreeHash: TreeHash, signer: Signer, pubDate?: string}} options
+ */
+export function createPreparedPackage({ app, stage, version, notes, sourceCommit, currentFeed, appTreeHash, signer, pubDate = rfc822(new Date()) }) {
+  verifyUniversal(app)
+  const archive = path.join(stage, archiveName(version))
+  createDmg({ app, output: archive })
+  const appTreeSHA256 = verifyArchive(archive, app, appTreeHash)
+  const { signature, length } = signer.signArchive(archive)
+  const release = { version, url: downloadURL(version), length, signature, appTreeSHA256, sourceCommit, notes, pubDate }
+  const feed = path.join(stage, 'appcast.xml')
+  writeFileSync(feed, appendRelease(currentFeed, release))
+  signer.signFeed(feed)
+  writeFileSync(path.join(stage, 'release.json'), `${JSON.stringify({ ...release, archive: archiveName(version), archiveSHA256: sha256File(archive), sourceCommit: sourceCommit ?? null }, null, 2)}\n`)
 }
 
 /** @param {{outputDirectory?: string|undefined, notes?: string|undefined}} options */
@@ -174,16 +202,7 @@ async function packageRelease({ outputDirectory, notes } = {}) {
     const { appTreeHash } = ownership
     const app = builder.buildApp({ outputDirectory: path.join(stage, 'build'), universal: true })
     const sourceCommit = snapshot && git('rev-parse', 'HEAD') === startCommit ? startCommit : undefined
-    verifyUniversal(app)
-    const archive = path.join(stage, archiveName(version))
-    run('/usr/bin/ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', app, archive])
-    const appTreeSHA256 = verifyArchive(archive, app, appTreeHash)
-    const { signature, length } = signArchive(sdk, archive, publicEDKey)
-    const release = { version, url: downloadURL(version), length, signature, appTreeSHA256, sourceCommit, notes: notes ?? `OMP Usage ${version}`, pubDate: rfc822(new Date()) }
-    const feed = path.join(stage, 'appcast.xml')
-    writeFileSync(feed, appendRelease(existsSync(feedPath) ? readFileSync(feedPath, 'utf8') : emptyFeed(), release))
-    signFeed(sdk, feed, publicEDKey)
-    writeFileSync(path.join(stage, 'release.json'), `${JSON.stringify({ ...release, archive: archiveName(version), archiveSHA256: sha256File(archive), sourceCommit: sourceCommit ?? null }, null, 2)}\n`)
+    createPreparedPackage({ app, stage, version, notes: notes ?? `OMP Usage ${version}`, sourceCommit, currentFeed: existsSync(feedPath) ? readFileSync(feedPath, 'utf8') : emptyFeed(), appTreeHash, signer: keychainSigner(sdk, publicEDKey) })
     rmSync(path.join(stage, 'build'), { recursive: true, force: true })
     renameSync(stage, output)
   } finally {
@@ -204,24 +223,33 @@ function verifyUniversal(app) {
 }
 
 /**
- * Round-trips the archive and returns the tree hash of the final app; it must equal the built app's.
+ * Round-trips the image through a read-only mount (exact layout, universal deep-signed app) and returns the tree hash of the
+ * mounted app; it must equal the built app's.
  * @param {string} archive @param {string} builtApp @param {TreeHash} appTreeHash
  */
 function verifyArchive(archive, builtApp, appTreeHash) {
-  const directory = mkdtempSync(path.join(tmpdir(), 'omp-release-verify-'))
-  try {
-    run('/usr/bin/ditto', ['-x', '-k', archive, directory])
-    const extracted = path.join(directory, 'OMP Usage.app'), entries = readdirSync(directory)
-    if (entries.length !== 1 || !existsSync(extracted)) throw new Error('Archive must contain exactly OMP Usage.app')
-    verifyUniversal(extracted)
-    const hash = appTreeHash(extracted)
-    if (hash !== appTreeHash(builtApp)) throw new Error('Archive extraction changed the app tree')
+  return withDmgApp(archive, mounted => {
+    verifyUniversal(mounted)
+    const hash = appTreeHash(mounted)
+    if (hash !== appTreeHash(builtApp)) throw new Error('DMG mount changed the app tree')
     return hash
-  } finally { rmSync(directory, { recursive: true, force: true }) }
+  })
 }
 
 /** @param {string} item */
 function sourceCommitOf(item) { return /<omp:sourceCommit>([a-f0-9]{40})<\/omp:sourceCommit>/.exec(item)?.[1] }
+
+/**
+ * Fields of one feed item; throws when the enclosure, tree hash or notes are missing or malformed.
+ * @param {string} item
+ */
+export function parseItem(item) {
+  const enclosure = /<enclosure url="([^"]+)" length="(\d+)" type="application\/octet-stream" sparkle:edSignature="([^"]+)" \/>/.exec(item)
+  const hash = /<omp:appTreeSHA256>([a-f0-9]{64})<\/omp:appTreeSHA256>/.exec(item)
+  const description = /<description sparkle:descriptionFormat="plain-text"><!\[CDATA\[([\s\S]*)\]\]><\/description>/.exec(item)
+  if (!enclosure || !hash || !description) throw new Error('Candidate feed item is malformed')
+  return { url: enclosure[1], length: Number(enclosure[2]), signature: enclosure[3], appTreeSHA256: hash[1], notes: description[1], sourceCommit: sourceCommitOf(item) }
+}
 
 /**
  * True only when the signed candidate feed of a prepared package attests a clean build of `head`.
@@ -235,33 +263,37 @@ function hasCleanProvenance(output, publicEDKey, head) {
  * Authenticates a prepared package against its signed candidate feed before any network mutation.
  * @param {{output: string, version: string, notes: string, publicEDKey: string, currentFeed: string, appTreeHash: TreeHash, head: string}} options
  */
-function verifyPrepared({ output, version, notes, publicEDKey, currentFeed, appTreeHash, head }) {
+export function verifyPrepared({ output, version, notes, publicEDKey, currentFeed, appTreeHash, head }) {
   const feedText = verifyFeed(path.join(output, 'appcast.xml'), publicEDKey)
   const items = feedItems(feedText), item = items.at(-1)
   if (!item || itemVersion(item) !== version) throw new Error('Candidate feed does not end with the version being published')
   const previous = feedItems(currentFeed)
   if (items.length !== previous.length + 1 || previous.some((old, index) => old.trim() !== items[index].trim())) throw new Error('Candidate feed does not extend the current signed feed')
-  const enclosure = /<enclosure url="([^"]+)" length="(\d+)" type="application\/octet-stream" sparkle:edSignature="([^"]+)" \/>/.exec(item)
-  const hash = /<omp:appTreeSHA256>([a-f0-9]{64})<\/omp:appTreeSHA256>/.exec(item)
-  const description = /<description sparkle:descriptionFormat="plain-text"><!\[CDATA\[([\s\S]*)\]\]><\/description>/.exec(item)
-  if (!enclosure || !hash || !description) throw new Error('Candidate feed item is malformed')
-  if (sourceCommitOf(item) !== head) throw new Error('Package was not built from the clean pinned HEAD commit; remove it to rebuild')
-  if (enclosure[1] !== downloadURL(version)) throw new Error('Candidate feed enclosure URL is not the release asset URL')
-  if (description[1] !== notes) throw new Error('Candidate feed notes differ from the supplied notes')
-  const archive = path.join(output, archiveName(version)), data = readFileSync(archive)
-  if (data.length !== Number(enclosure[2])) throw new Error('Archive length differs from the signed feed')
-  if (!verifySignature(data, enclosure[3], publicEDKey)) throw new Error('Archive signature does not verify against the pinned public key')
-  const directory = mkdtempSync(path.join(tmpdir(), 'omp-release-prepared-'))
-  try {
-    run('/usr/bin/ditto', ['-x', '-k', archive, directory])
-    const extracted = path.join(directory, 'OMP Usage.app')
-    if (readdirSync(directory).length !== 1 || !existsSync(extracted)) throw new Error('Archive must contain exactly OMP Usage.app')
+  const parsed = parseItem(item)
+  if (parsed.sourceCommit !== head) throw new Error('Package was not built from the clean pinned HEAD commit; remove it to rebuild')
+  if (parsed.url !== downloadURL(version)) throw new Error('Candidate feed enclosure URL is not the release asset URL')
+  if (parsed.notes !== notes) throw new Error('Candidate feed notes differ from the supplied notes')
+  const archive = path.join(output, archiveName(version))
+  return { archive, url: parsed.url, sha256: verifyReleaseAsset({ file: archive, item: parsed, version, publicEDKey, appTreeHash }) }
+}
+
+/**
+ * Authenticates one release asset against its signed feed item: length, Ed25519 signature over the exact bytes (checked before the
+ * image is ever mounted), then a read-only mount that must hold exactly the app and install note, a universal deep-signed app of
+ * the expected version, and the signed trusted tree hash. Returns the asset SHA-256.
+ * @param {{file: string, item: ReturnType<typeof parseItem>, version: string, publicEDKey: string, appTreeHash: TreeHash}} options
+ */
+export function verifyReleaseAsset({ file, item, version, publicEDKey, appTreeHash }) {
+  const data = readFileSync(file)
+  if (data.length !== item.length) throw new Error('Archive length differs from the signed feed')
+  if (!verifySignature(data, item.signature, publicEDKey)) throw new Error('Archive signature does not verify against the pinned public key')
+  withDmgApp(file, extracted => {
     verifyUniversal(extracted)
     const info = run('/usr/bin/plutil', ['-extract', 'CFBundleShortVersionString', 'raw', '-o', '-', path.join(extracted, 'Contents/Info.plist')]).trim()
     if (info !== version) throw new Error(`Archive app version ${info} differs from ${version}`)
-    if (appTreeHash(extracted) !== hash[1]) throw new Error('Archive app tree hash differs from the signed feed')
-  } finally { rmSync(directory, { recursive: true, force: true }) }
-  return { archive, url: enclosure[1], sha256: createHash('sha256').update(data).digest('hex') }
+    if (appTreeHash(extracted) !== item.appTreeSHA256) throw new Error('Archive app tree hash differs from the signed feed')
+  })
+  return createHash('sha256').update(data).digest('hex')
 }
 
 /** Existing remote tag must point at HEAD; returns whether the tag exists. @param {string} tag @param {string} head */
@@ -314,7 +346,7 @@ async function publish({ notesFile, dryRun }) {
   const prepared = verifyPrepared({ output, version, notes, publicEDKey, currentFeed: feedText, appTreeHash, head })
   // Safe order: 1) public release asset, 2) verify the public download, 3) signed feed commit.
   if (!releaseExists) gh('release', 'create', tag, prepared.archive, '--repo', defaults.repository, '--target', head, '--title', `OMP Usage ${version}`, '--notes', notes)
-  const download = path.join(output, 'download-check.zip')
+  const download = path.join(output, `download-check${path.extname(prepared.archive)}`)
   run('/usr/bin/curl', ['--fail', '--location', '--proto', '=https', '--silent', '--show-error', '--output', download, prepared.url])
   if (sha256File(download) !== prepared.sha256) throw new Error('Published asset differs from the prepared archive; feed NOT updated')
   rmSync(download)
@@ -324,6 +356,65 @@ async function publish({ notesFile, dryRun }) {
   git('commit', '-m', `Publish OMP Usage ${version} update feed`)
   git('push', 'origin', 'HEAD:main')
   console.log(JSON.stringify({ published: version, release: `https://github.com/${defaults.repository}/releases/tag/${tag}` }, null, 2))
+}
+
+/**
+ * Feed text containing only the kept release item, byte-for-byte as it appears in `feedText` (callers verify its signature first).
+ * The kept release must be the newest one so no newer release can be dropped.
+ * @param {string} feedText @param {string} keepVersion
+ * @returns {{text: string, kept: string, removed: string[]}}
+ */
+export function prunedFeed(feedText, keepVersion) {
+  const items = feedItems(feedText), kept = items.find(item => itemVersion(item) === keepVersion)
+  if (!kept) throw new Error(`Signed feed has no item for version ${keepVersion}`)
+  const newer = items.filter(item => compareVersions(itemVersion(item), keepVersion) > 0)
+  if (newer.length) throw new Error(`Refusing to prune: the feed contains newer versions (${newer.map(itemVersion).join(', ')})`)
+  const text = renderFeed([kept])
+  if (feedItems(text).length !== 1 || feedItems(text)[0] !== kept) throw new Error('Pruned feed did not retain the kept item exactly')
+  return { text, kept, removed: items.filter(item => item !== kept).map(itemVersion) }
+}
+
+/**
+ * Signed feed maintenance after a release is public: retains only `keepVersion` in the feed. Never deletes GitHub releases or tags.
+ * Refuses unless the kept item's public asset (length, Ed25519 signature, DMG layout, universal app, version, tree hash) and the live feed verify.
+ * @param {{keepVersion: string, dryRun: boolean}} options
+ */
+async function prune({ keepVersion, dryRun }) {
+  if (!/^\d+\.\d+\.\d+$/.test(keepVersion)) throw new Error(`--keep-version must be MAJOR.MINOR.PATCH, got ${JSON.stringify(keepVersion)}`)
+  const { appTreeHash } = await import('./ownership.mjs')
+  const channel = readChannel(), publicEDKey = channel.publicEDKey
+  if (git('status', '--porcelain')) throw new Error('Working tree must be clean before pruning')
+  if (git('branch', '--show-current') !== 'main') throw new Error('Prune from the main branch')
+  if (!dryRun) git('fetch', 'origin', 'main')
+  const head = git('rev-parse', 'HEAD'), remoteMain = () => dryRun ? git('ls-remote', 'origin', 'refs/heads/main').split(/\s+/)[0] : git('rev-parse', 'origin/main')
+  if (head !== remoteMain()) throw new Error('HEAD must equal origin/main (push or pull first)')
+  const localFeed = verifyFeed(feedPath, publicEDKey), { text: candidate, kept, removed } = prunedFeed(localFeed, keepVersion)
+  const live = run('/usr/bin/curl', ['--fail', '--location', '--proto', '=https', '--silent', '--show-error', channel.feedURL])
+  verifyFeedText(live, publicEDKey, channel.feedURL)
+  if (live !== localFeed) throw new Error('The live feed differs from the committed feed (the raw-content cache can lag a few minutes after a push); retry later')
+  const parsed = parseItem(kept)
+  if (parsed.url !== downloadURL(keepVersion)) throw new Error('Kept feed item does not point at the DMG release asset')
+  const directory = mkdtempSync(path.join(tmpdir(), 'omp-release-prune-'))
+  try {
+    const asset = path.join(directory, archiveName(keepVersion))
+    run('/usr/bin/curl', ['--fail', '--location', '--proto', '=https', '--silent', '--show-error', '--output', asset, parsed.url])
+    verifyReleaseAsset({ file: asset, item: parsed, version: keepVersion, publicEDKey, appTreeHash })
+    if (!removed.length) { console.log(JSON.stringify({ pruned: false, keep: keepVersion, note: 'Feed already contains only the kept release; live feed and public asset verified' }, null, 2)); return }
+    if (dryRun) { console.log(JSON.stringify({ dryRun: true, keep: keepVersion, remove: removed, note: 'Live feed and public asset verified; nothing was written, committed or pushed' }, null, 2)); return }
+    const original = readFileSync(feedPath)
+    try {
+      writeFileSync(feedPath, candidate)
+      signFeed(ensureSparkleSdk(), feedPath, publicEDKey)
+      const signed = verifyFeed(feedPath, publicEDKey), items = feedItems(signed)
+      if (items.length !== 1 || items[0] !== kept) throw new Error('Signed pruned feed does not retain exactly the kept item')
+    } catch (error) { writeFileSync(feedPath, original); throw error }
+    git('add', 'updates/appcast.xml')
+    git('commit', '-m', `Prune OMP Usage update feed to ${keepVersion}`)
+    git('push', 'origin', 'HEAD:main')
+    const pushed = git('rev-parse', 'HEAD')
+    if (git('ls-remote', 'origin', 'refs/heads/main').split(/\s+/)[0] !== pushed) throw new Error('origin/main does not equal the pruned feed commit')
+    console.log(JSON.stringify({ pruned: true, keep: keepVersion, removed, commit: pushed, note: 'GitHub releases and tags were not touched' }, null, 2))
+  } finally { rmSync(directory, { recursive: true, force: true }) }
 }
 
 /**
@@ -350,5 +441,9 @@ if (import.meta.main) {
     const { values, switches } = parse(args, { 'notes-file': 'value', 'dry-run': 'switch' }), notesFile = values.get('notes-file')
     if (!notesFile) throw new Error(usage)
     await publish({ notesFile, dryRun: switches.has('dry-run') })
+  } else if (command === 'prune') {
+    const { values, switches } = parse(args, { 'keep-version': 'value', 'dry-run': 'switch' }), keepVersion = values.get('keep-version')
+    if (!keepVersion) throw new Error(usage)
+    await prune({ keepVersion, dryRun: switches.has('dry-run') })
   } else throw new Error(usage)
 }

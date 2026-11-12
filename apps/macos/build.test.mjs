@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { promisify } from 'node:util'
 import { runtimeFiles, sourceRoot } from './build.mjs'
 import { defaultConfig } from './config.mjs'
@@ -26,5 +26,43 @@ test('packaged collector runs outside the checkout without providers or host pac
     })
     const result = JSON.parse(stdout)
     assert.equal(result.source, 'live'); assert.equal(result.snapshot.accounts[0].provider, 'mistral'); assert.equal(result.summaries[0].percent, 42)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('packaged setup helper starts from the copied runtime alone and refuses invalid requests with a controlled error before creating anything', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'omp-panel-setup-runtime-'))
+  try {
+    const runtime = path.join(directory, 'runtime'), home = path.join(directory, 'home'), helper = path.join(runtime, 'apps/macos/setup-install.mjs')
+    for (const file of runtimeFiles) {
+      const target = path.join(runtime, file)
+      mkdirSync(path.dirname(target), { recursive: true }); copyFileSync(path.join(sourceRoot, file), target)
+    }
+    mkdirSync(home)
+    /** @param {string} command @param {string} input @param {string} code */
+    const refused = (command, input, code) => {
+      const result = spawnSync(process.execPath, [helper, command], { input, encoding: 'utf8', cwd: directory, env: { ...process.env, HOME: home, NODE_PATH: '' } })
+      const payload = JSON.parse(result.stdout)
+      assert.equal(result.status, 1)
+      assert.equal(payload.ok, false); assert.equal(payload.command, command); assert.equal(payload.error.code, code)
+      // The public answer never echoes the request or the account's paths.
+      assert.ok(!result.stdout.includes(directory))
+    }
+    const valid = { sourceAppPath: path.join(directory, 'OMP Usage.app'), hostPid: 4001 }
+    // Every case fails inside the packaged modules, so a missing module of the import closure would break these at process start instead.
+    refused('frobnicate', JSON.stringify(valid), 'invalid-request')
+    refused('install', JSON.stringify({ ...valid, hostPid: '4001' }), 'invalid-request')
+    refused('install', JSON.stringify({ ...valid, nodePath: 5 }), 'invalid-request')
+    refused('launch', JSON.stringify({ ...valid, nodePath: '/bin/sh' }), 'invalid-request')
+    refused('install', '[]', 'invalid-request')
+    refused('install', '{ not json', 'invalid-request')
+    // The request limit is 64 KiB. A request of exactly that size is read and judged on its content (the copied runtime is no app bundle, so
+    // it reaches the bundle check); a single byte more is refused as oversized without being interpreted.
+    const limit = 65536
+    /** @param {number} bytes */
+    const padded = bytes => { const body = JSON.stringify(valid); return body + ' '.repeat(bytes - Buffer.byteLength(body)) }
+    refused('launch', padded(limit), 'source-mismatch')
+    refused('launch', padded(limit + 1), 'invalid-request')
+    // Nothing was created: no app, configuration, state or LaunchAgent under the account home.
+    assert.deepEqual(readdirSync(home), [])
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
