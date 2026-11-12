@@ -598,7 +598,7 @@ function parse(args, flags) {
   }
   return { values, switches }
 }
-if (import.meta.main) {
+async function main() {
   const [command, ...args] = process.argv.slice(2)
   if (command === 'setup') setup({ publicKey: parse(args, { 'public-key': 'value' }).values.get('public-key') })
   else if (command === 'package') {
@@ -613,4 +613,8 @@ if (import.meta.main) {
     if (!keepVersion) throw new Error(usage)
     await prune({ keepVersion, dryRun: switches.has('dry-run') })
   } else throw new Error(usage)
+}
+if (import.meta.main) {
+  // Not a top-level await: ci-release.mjs imports this module, so awaiting here would make the entry module wait on itself.
+  main().catch(error => { console.error(error); process.exitCode = 1 })
 }
