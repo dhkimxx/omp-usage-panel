@@ -114,4 +114,142 @@ func runDashboardModelTests() {
     precondition(wide.cards.count == 8 && wide.footer.hasPrefix("8 providers"))
     precondition(wide.cards[3].percent == 104 && wide.cards[3].tooltip.contains("104%"))
     precondition(wide.cards.map { $0.provider } == (0..<8).map { "provider\($0)" })
+    runProviderRemovalTransitionTests()
+}
+
+// The provider lifecycle as the panel sees it: successive collections feed ONE saved selection through the
+// dashboard cards and the compact plan. Synthetic fixtures only; a trailing "?" marks a not-reported placeholder.
+private func runProviderRemovalTransitionTests() {
+    func account(_ provider: String, _ id: String) -> UsageAccount {
+        UsageAccount(id: id, provider: provider, label: id, fetchedAt: 1000, plan: nil, notes: [], limits: [])
+    }
+    func summary(_ provider: String, accounts: Int) -> ProviderSummary {
+        ProviderSummary(provider: provider, label: provider, percent: accounts > 0 ? 10 : nil,
+                        value: accounts > 0 ? "10%" : "—", severity: accounts > 0 ? "normal" : "unknown",
+                        accountCount: accounts, accountId: nil, accountLabel: nil, metricId: nil, metricLabel: nil,
+                        windowLabel: nil, notes: [])
+    }
+    // One collection taken at `at` (ms): accounts per provider (in upstream order) plus providers reported only as
+    // unavailable.
+    func collection(_ providers: [(String, Int)], unavailableOnly: [String] = [], source: String = "live",
+                    error: String? = nil, at: Double = 14000) -> PanelResult {
+        let accounts = providers.flatMap { provider, count in (0..<count).map { account(provider, "\(provider)-\($0)") } }
+        let unavailable = unavailableOnly.map { UsageUnavailable(provider: $0, label: "\($0) account", reason: "Usage unavailable") }
+        return PanelResult(snapshot: UsageSnapshot(version: 1, capturedAt: at, accounts: accounts, unavailable: unavailable),
+                           source: source, error: error,
+                           summaries: providers.map { summary($0.0, accounts: $0.1) } + unavailableOnly.map { summary($0, accounts: 0) })
+    }
+    struct TransportFailure: Error {}
+    // Replays the panel's receive path through the same UsageIntake; `nil` is a transport failure.
+    func replay(_ steps: [PanelResult?]) -> UsageIntake {
+        var intake = UsageIntake()
+        for step in steps {
+            intake.receive(step.map { Result<PanelResult, Error>.success($0) } ?? .failure(TransportFailure()))
+        }
+        return intake
+    }
+    // The compact row of the final state; a trailing "?" marks a not-reported placeholder.
+    func row(_ intake: UsageIntake, selection: [String]) -> [String] {
+        let issue = intake.transportError.map { "Stale: \($0)" } ?? ""
+        let cards = DashboardModel.make(result: intake.result, issue: issue, collecting: false, showPace: true).cards
+        let plan = CompactSlotPlanner.plan(cards: cards,
+                                           preferences: CompactPreferences(maximumVisibleSlots: 6, selectedProviderIDs: selection),
+                                           physicalCapacity: CompactCapacities(left: 10, right: 10, total: 10),
+                                           issue: issue, connectedProviders: intake.roster.known)
+        return plan.slots.map { slot in
+            switch slot {
+            case .provider(let ring): return ring.isReported ? ring.provider : "\(ring.provider)?"
+            case .more(let more): return more.text
+            case .configure: return "configure"
+            }
+        }
+    }
+    func compact(_ steps: [PanelResult?], selection: [String]) -> [String] { row(replay(steps), selection: selection) }
+    // The same snapshot as `last`, as the collector returns it after a failed refresh / from a fresh disk cache.
+    func failedRefresh(of last: PanelResult) -> PanelResult {
+        PanelResult(snapshot: last.snapshot, source: "stale", error: "Usage refresh failed", summaries: last.summaries)
+    }
+    func cached(_ last: PanelResult) -> PanelResult {
+        PanelResult(snapshot: last.snapshot, source: "cache", error: nil, summaries: last.summaries)
+    }
+    func providers(in intake: UsageIntake) -> Set<String> {
+        Set((intake.result?.snapshot?.accounts.map(\.provider) ?? []) + (intake.result?.summaries.map(\.provider) ?? []))
+    }
+    let selection = ["codex", "go", "mistral"]
+    let connected = collection([("codex", 1), ("go", 1), ("mistral", 2)], at: 14000)
+    precondition(compact([connected], selection: selection) == ["codex", "go", "mistral"])
+
+    // Removing a provider: the next successful collection no longer reports it, and its ring disappears at once.
+    let withoutGo = collection([("codex", 1), ("mistral", 2)], at: 15000)
+    precondition(compact([connected, withoutGo], selection: selection) == ["codex", "mistral"])
+    precondition(DashboardModel.make(result: withoutGo, issue: "", collecting: false, showPace: true).cards.map(\.provider)
+                 == ["codex", "mistral"])
+    // Before any confirmed roster nothing is known and saved selections keep their placeholders: first load, and a
+    // first collection that failed (stale fallback, or nothing at all).
+    precondition(compact([], selection: selection) == ["codex?", "go?", "mistral?"])
+    precondition(compact([nil], selection: selection) == ["codex?", "go?", "mistral?"])
+    precondition(compact([failedRefresh(of: withoutGo)], selection: selection) == ["codex", "mistral", "go?"])
+    // First load whose only answer is an old stale snapshot is accepted as data (nothing newer exists).
+    precondition(compact([failedRefresh(of: connected)], selection: selection) == ["codex", "go", "mistral"])
+    // After a confirmed removal a later failure of either kind must not resurrect it.
+    precondition(compact([connected, withoutGo, failedRefresh(of: withoutGo)], selection: selection) == ["codex", "mistral"])
+    precondition(compact([connected, withoutGo, nil], selection: selection) == ["codex", "mistral"])
+    precondition(compact([connected, withoutGo, nil, failedRefresh(of: withoutGo), nil], selection: selection) == ["codex", "mistral"])
+    // Reconnecting needs an authoritative collection, and then brings it back from the untouched selection.
+    precondition(compact([connected, withoutGo, failedRefresh(of: withoutGo), connected], selection: selection) == ["codex", "go", "mistral"])
+
+    // The disk cache is best effort: if its write failed after the removal, a later failure returns the OLDER
+    // pre-removal snapshot (stale) and a later healthy answer may be that same older file (cache). Neither may
+    // bring back the removed provider's data, accounts or ring, and neither may move the roster backwards.
+    let afterOldStale = replay([connected, withoutGo, failedRefresh(of: connected)])
+    precondition(row(afterOldStale, selection: selection) == ["codex", "mistral"])
+    precondition(afterOldStale.result?.snapshot?.capturedAt == 15000 && !providers(in: afterOldStale).contains("go"))
+    precondition(afterOldStale.roster.known == Set(["codex", "mistral"].map(\.exactKey)))
+    // The failure stays visible next to the kept data: the transport error is set and every card is flagged.
+    precondition(afterOldStale.transportError == "Usage refresh failed")
+    let flagged = DashboardModel.make(result: afterOldStale.result, issue: "Stale: Usage refresh failed", collecting: false, showPace: true)
+    precondition(!flagged.cards.isEmpty && flagged.cards.allSatisfy(\.hasIssue) && flagged.status.contains("Usage refresh failed"))
+    let afterOldCache = replay([connected, withoutGo, cached(connected)])
+    precondition(row(afterOldCache, selection: selection) == ["codex", "mistral"])
+    precondition(afterOldCache.result?.snapshot?.capturedAt == 15000 && !providers(in: afterOldCache).contains("go"))
+    precondition(afterOldCache.roster.known == Set(["codex", "mistral"].map(\.exactKey)) && afterOldCache.transportError == nil)
+    // An old cache hit after an earlier failure leaves that failure visible rather than claiming health.
+    precondition(replay([connected, withoutGo, nil, cached(connected)]).transportError != nil)
+    // Same for a confirmed EMPTY roster.
+    let nothing = collection([], at: 15000)
+    let emptyOldStale = replay([connected, nothing, failedRefresh(of: connected)])
+    precondition(row(emptyOldStale, selection: selection) == ["configure"])
+    precondition(emptyOldStale.result?.snapshot?.accounts.isEmpty == true && emptyOldStale.result?.summaries.isEmpty == true)
+    precondition(row(replay([connected, nothing, cached(connected)]), selection: selection) == ["configure"])
+    // The roster alone also refuses to move backwards on an older healthy cache answer.
+    var roster = ConnectedProviders()
+    roster.observe(withoutGo); roster.observe(cached(connected))
+    precondition(roster.known == Set(["codex", "mistral"].map(\.exactKey)) && roster.confirmedAt == 15000)
+    // Newer data is never blocked: a healthy cache/live answer taken after the removal is accepted, including the
+    // genuine reconnect, and clears the failure.
+    let reconnected = collection([("codex", 1), ("go", 1), ("mistral", 2)], at: 16000)
+    let recovered = replay([connected, withoutGo, failedRefresh(of: connected), reconnected])
+    precondition(row(recovered, selection: selection) == ["codex", "go", "mistral"] && recovered.transportError == nil)
+    precondition(row(replay([connected, withoutGo, cached(collection([("codex", 1)], at: 15500))]), selection: selection) == ["codex"])
+    // A source change forgets everything: an old stale snapshot is then first-load data again.
+    var switched = replay([connected, withoutGo])
+    switched.reset()
+    switched.receive(.success(failedRefresh(of: connected)))
+    precondition(row(switched, selection: selection) == ["codex", "go", "mistral"])
+
+    // Removing one of several accounts keeps the provider; a provider whose usage fetch merely failed is still
+    // reported (as an unavailable report) and keeps its ring.
+    precondition(compact([connected, collection([("codex", 1), ("go", 1), ("mistral", 1)], at: 15000)], selection: selection) == ["codex", "go", "mistral"])
+    precondition(compact([connected, collection([("codex", 1), ("go", 1)], unavailableOnly: ["mistral"], at: 15000)], selection: selection) == ["codex", "go", "mistral"])
+    precondition(compact([connected, collection([("codex", 1), ("mistral", 2)], source: "cache", at: 15000)], selection: selection) == ["codex", "mistral"])
+
+    // Every provider removed: no ghosts, one configure control and an empty overview. A later failure keeps it so.
+    precondition(compact([connected, nothing], selection: selection) == ["configure"])
+    precondition(compact([connected, nothing, failedRefresh(of: nothing)], selection: selection) == ["configure"])
+    precondition(compact([connected, nothing, nil], selection: selection) == ["configure"])
+    precondition(compact([connected, nothing, nil, connected], selection: selection) == ["codex", "go", "mistral"])
+    let emptyContent = DashboardModel.make(result: nothing, issue: "", collecting: false, showPace: true)
+    precondition(emptyContent.cards.isEmpty && nothing.snapshot?.accounts.isEmpty == true)
+    // An empty roster that was never confirmed (the first collection itself failed) still keeps the placeholders.
+    precondition(compact([failedRefresh(of: nothing)], selection: selection) == ["codex?", "go?", "mistral?"])
 }

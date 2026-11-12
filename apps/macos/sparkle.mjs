@@ -69,11 +69,19 @@ export function ensureSparkleSdk() {
   return { root, framework: path.join(root, 'Sparkle.framework'), license: path.join(root, 'LICENSE'), signUpdate: path.join(root, 'bin/sign_update'), generateKeys: path.join(root, 'bin/generate_keys') }
 }
 
-/** @returns {{feedURL:string, publicEDKey:string, account:string, namespace:string}} */
-export function readChannel() {
-  if (!existsSync(channelPath)) throw new Error('apps/macos/update-channel.json is missing; run `npm run release:setup` first')
-  const value = JSON.parse(readFileSync(channelPath, 'utf8'))
+/**
+ * Validates the bytes of update-channel.json against the project update channel. Pure: callers decide where the bytes come from.
+ * @param {string|Uint8Array} data @returns {{feedURL:string, publicEDKey:string, account:string, namespace:string}}
+ */
+export function parseChannel(data) {
+  const value = JSON.parse(typeof data === 'string' ? data : Buffer.from(data).toString('utf8'))
   if (value.feedURL !== defaults.feedURL || value.account !== defaults.account || value.namespace !== defaults.namespace) throw new Error('update-channel.json does not match the project update channel')
   if (typeof value.publicEDKey !== 'string' || Buffer.from(value.publicEDKey, 'base64').length !== 32 || Buffer.from(value.publicEDKey, 'base64').toString('base64') !== value.publicEDKey) throw new Error('update-channel.json publicEDKey is not a valid Ed25519 public key')
   return { feedURL: value.feedURL, publicEDKey: value.publicEDKey, account: value.account, namespace: value.namespace }
+}
+
+/** @returns {{feedURL:string, publicEDKey:string, account:string, namespace:string}} */
+export function readChannel() {
+  if (!existsSync(channelPath)) throw new Error('apps/macos/update-channel.json is missing; run `npm run release:setup` first')
+  return parseChannel(readFileSync(channelPath, 'utf8'))
 }

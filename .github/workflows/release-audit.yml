@@ -1,0 +1,47 @@
+name: Release audit
+
+# Keyless, read-only audit of the COMMITTED signed update feed against the public GitHub releases, tags and DMG assets.
+# It runs after a feed/channel push (the release asset is intentionally uploaded before the feed commit, so there is no
+# release trigger), on demand, and weekly to catch later tampering. It holds no secrets, signs nothing and never runs the app.
+on:
+  push:
+    branches: [main]
+    paths:
+      - updates/appcast.xml
+      - apps/macos/update-channel.json
+      - apps/macos/release-audit.mjs
+      - apps/macos/release.mjs
+      - apps/macos/dmg.mjs
+      - apps/macos/ownership.mjs
+      - apps/macos/sparkle.mjs
+      - .github/workflows/release-audit.yml
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+# Every run on main audits the newest committed feed, so a newer run supersedes an older one. The group includes the ref so a
+# manual run on another branch (which the job refuses) can never cancel a legitimate audit of main.
+concurrency:
+  group: release-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    # The audit trusts the feed committed on main; refuse a manual run from any other ref.
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22.18.0
+      - name: Audit the committed feed against public releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node apps/macos/release-audit.mjs

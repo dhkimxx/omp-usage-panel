@@ -1,16 +1,16 @@
 import { createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { buildApp as buildWorkingApp } from './build.mjs'
-import { createDmg, withDmgApp } from './dmg.mjs'
+import { DmgCleanupError, createDmg, withDmgApp } from './dmg.mjs'
 import { channelPath, defaults, ensureSparkleSdk, feedPath, readChannel, rootVersion, sourceRoot } from './sparkle.mjs'
 
 const usage = `Usage:
   node apps/macos/release.mjs setup [--public-key base64]
-  node apps/macos/release.mjs package [--output directory] [--notes-file file]
+  node apps/macos/release.mjs package [--output directory] [--notes-file file] [--ci-run id]
   node apps/macos/release.mjs publish --notes-file file [--dry-run]
   node apps/macos/release.mjs prune --keep-version MAJOR.MINOR.PATCH [--dry-run]`
 
@@ -21,6 +21,7 @@ const usage = `Usage:
 function run(command, args, options = {}) { return execFileSync(command, args, { ...options, encoding: 'utf8' }) }
 /** @typedef {import('./sparkle.mjs').SparkleSdk} SparkleSdk */
 /** @typedef {(app: string) => string} TreeHash */
+/** @typedef {import('./dmg.mjs').Hdiutil} Hdiutil */
 /** @param {string[]} args */
 function git(...args) { return run('/usr/bin/git', args, { cwd: sourceRoot }).trim() }
 /** @param {string[]} args */
@@ -155,34 +156,17 @@ function setup({ publicKey } = {}) {
 function keychainSigner(sdk, publicEDKey) { return { signArchive: file => signArchive(sdk, file, publicEDKey), signFeed: file => signFeed(sdk, file, publicEDKey) } }
 
 /**
- * Builds the DMG from the built app, verifies it through a read-only mount, signs it and writes the candidate feed and release.json into `stage`.
- * @param {{app: string, stage: string, version: string, notes: string, sourceCommit: string|undefined, currentFeed: string, appTreeHash: TreeHash, signer: Signer, pubDate?: string}} options
+ * Builds the universal app and hands it to `body`. With a clean tree the app is built from a private `git archive` snapshot of the
+ * pinned commit, so the compiled bytes are exactly the committed bytes; only then is `sourceCommit` set (and later signed into the feed item).
+ * A dirty tree builds the working source and carries no claim, so publish rejects it; `requireClean` refuses that case up front.
+ * @template T
+ * @param {{outputDirectory: string, requireClean?: boolean}} options
+ * @param {(built: {app: string, appTreeHash: TreeHash, sourceCommit: string|undefined}) => T | Promise<T>} body
+ * @returns {Promise<Awaited<T>>}
  */
-export function createPreparedPackage({ app, stage, version, notes, sourceCommit, currentFeed, appTreeHash, signer, pubDate = rfc822(new Date()) }) {
-  verifyUniversal(app)
-  const archive = path.join(stage, archiveName(version))
-  createDmg({ app, output: archive })
-  const appTreeSHA256 = verifyArchive(archive, app, appTreeHash)
-  const { signature, length } = signer.signArchive(archive)
-  const release = { version, url: downloadURL(version), length, signature, appTreeSHA256, sourceCommit, notes, pubDate }
-  const feed = path.join(stage, 'appcast.xml')
-  writeFileSync(feed, appendRelease(currentFeed, release))
-  signer.signFeed(feed)
-  writeFileSync(path.join(stage, 'release.json'), `${JSON.stringify({ ...release, archive: archiveName(version), archiveSHA256: sha256File(archive), sourceCommit: sourceCommit ?? null }, null, 2)}\n`)
-}
-
-/** @param {{outputDirectory?: string|undefined, notes?: string|undefined}} options */
-async function packageRelease({ outputDirectory, notes } = {}) {
-  const version = rootVersion(), channel = readChannel(), sdk = ensureSparkleSdk()
-  const publicEDKey = channel.publicEDKey
-  const output = path.resolve(outputDirectory || path.join(sourceRoot, 'build/release', version))
-  if (existsSync(output)) throw new Error(`Release output already exists: ${output}`)
-  const parent = path.dirname(output); mkdirSync(parent, { recursive: true })
-  const stage = mkdtempSync(path.join(parent, '.omp-release-'))
-  // Clean-source provenance: with a clean tree the app is built from a private `git archive` snapshot of the pinned commit, so the
-  // compiled bytes are exactly the committed bytes; only then is the commit claimed (and signed into the feed item).
-  // A dirty tree builds the working source and carries no claim, so publish rejects it.
+export async function withReleaseApp({ outputDirectory, requireClean = false }, body) {
   const startCommit = git('rev-parse', 'HEAD'), startClean = git('status', '--porcelain') === ''
+  if (requireClean && !startClean) throw new Error('The working tree must be clean: only committed source is built into a release')
   const snapshot = startClean ? mkdtempSync(path.join(tmpdir(), 'omp-release-source-')) : undefined
   try {
     /** @type {{buildApp: typeof buildWorkingApp}} */
@@ -200,15 +184,112 @@ async function packageRelease({ outputDirectory, notes } = {}) {
       ownership = await import(pathToFileURL(path.join(root, 'apps/macos/ownership.mjs')).href)
     }
     const { appTreeHash } = ownership
-    const app = builder.buildApp({ outputDirectory: path.join(stage, 'build'), universal: true })
+    const app = builder.buildApp({ outputDirectory, universal: true })
     const sourceCommit = snapshot && git('rev-parse', 'HEAD') === startCommit ? startCommit : undefined
-    createPreparedPackage({ app, stage, version, notes: notes ?? `OMP Usage ${version}`, sourceCommit, currentFeed: existsSync(feedPath) ? readFileSync(feedPath, 'utf8') : emptyFeed(), appTreeHash, signer: keychainSigner(sdk, publicEDKey) })
+    return await body({ app, appTreeHash, sourceCommit })
+  } finally {
+    if (snapshot) rmSync(snapshot, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Signs one DMG whose bytes are already final and writes the candidate feed and release.json beside it. Every release producer (the local build
+ * and the authenticated CI candidate) goes through here, so signing is always preceded by a read-only mount inspection (`inspect` returns the
+ * app tree hash) and the archive is provably never rewritten: its SHA-256 is identical before the inspection and after signing, and equals
+ * `expectedSHA256` when the caller pins the bytes it authenticated.
+ * @param {{archive: string, version: string, notes: string, sourceCommit: string|undefined, currentFeed: string, inspect: (archive: string) => string, signer: Signer, pubDate?: string|undefined, expectedSHA256?: string|undefined, ci?: Record<string, string|number>|undefined}} options
+ * @returns {{archive: string, sha256: string, appTreeSHA256: string}}
+ */
+export function prepareArchive({ archive, version, notes, sourceCommit, currentFeed, inspect, signer, pubDate = rfc822(new Date()), expectedSHA256, ci }) {
+  if (path.basename(archive) !== archiveName(version)) throw new Error(`Release archive must be named ${archiveName(version)}`)
+  const stage = path.dirname(archive), sha256 = sha256File(archive)
+  if (expectedSHA256 !== undefined && sha256 !== expectedSHA256) throw new Error('Archive bytes differ from the authenticated CI candidate')
+  const appTreeSHA256 = inspect(archive)
+  if (sha256File(archive) !== sha256) throw new Error('Archive changed while it was inspected')
+  const { signature, length } = signer.signArchive(archive)
+  if (sha256File(archive) !== sha256 || length !== statSync(archive).size) throw new Error('Archive changed while it was signed')
+  const release = { version, url: downloadURL(version), length, signature, appTreeSHA256, sourceCommit, notes, pubDate }
+  const feed = path.join(stage, 'appcast.xml')
+  writeFileSync(feed, appendRelease(currentFeed, release))
+  signer.signFeed(feed)
+  writeFileSync(path.join(stage, 'release.json'), `${JSON.stringify({ ...release, archive: archiveName(version), archiveSHA256: sha256, sourceCommit: sourceCommit ?? null, ...(ci ? { ci } : {}) }, null, 2)}\n`)
+  return { archive, sha256, appTreeSHA256 }
+}
+
+/**
+ * Builds the DMG from the built app, verifies it through a read-only mount, signs it and writes the candidate feed and release.json into `stage`.
+ * @param {{app: string, stage: string, version: string, notes: string, sourceCommit: string|undefined, currentFeed: string, appTreeHash: TreeHash, signer: Signer, pubDate?: string}} options
+ */
+export function createPreparedPackage({ app, stage, version, notes, sourceCommit, currentFeed, appTreeHash, signer, pubDate = rfc822(new Date()) }) {
+  verifyUniversal(app)
+  const archive = path.join(stage, archiveName(version))
+  createDmg({ app, output: archive })
+  prepareArchive({ archive, version, notes, sourceCommit, currentFeed, inspect: file => verifyArchive(file, app, appTreeHash), signer, pubDate })
+}
+
+/**
+ * One authenticated CI candidate: `archivePath` is the DMG file GitHub built and attested (a path to the downloaded file, not the bare file name
+ * recorded in candidate.json), `sha256` its digest at authentication time and `manifest` the identity it was authenticated against
+ * (`ci-release.mjs` produces it; this module relies on nothing else in it).
+ * @typedef {{archivePath: string, sha256: string, manifest: {sourceCommit: string, appTreeSHA256: string}, provenance: Record<string, string|number>}} CiCandidate
+ */
+
+/**
+ * Prepares a release package from the exact DMG bytes of an authenticated CI candidate: the bytes are copied unchanged into `stage`, inspected
+ * through a read-only mount against the candidate's tree hash and signed in place. The image is never rebuilt, repacked or modified.
+ * @param {{candidate: CiCandidate, stage: string, version: string, notes: string, currentFeed: string, appTreeHash: TreeHash, signer: Signer, pubDate?: string|undefined}} options
+ */
+export function prepareFromCandidate({ candidate, stage, version, notes, currentFeed, appTreeHash, signer, pubDate }) {
+  const archive = path.join(stage, archiveName(version))
+  copyFileSync(candidate.archivePath, archive, constants.COPYFILE_EXCL)
+  return prepareArchive({
+    archive, version, notes, sourceCommit: candidate.manifest.sourceCommit, currentFeed, signer, pubDate,
+    expectedSHA256: candidate.sha256, ci: candidate.provenance,
+    inspect: file => inspectArchive({ file, version, appTreeHash, expectedAppTreeSHA256: candidate.manifest.appTreeSHA256, expectedFrom: 'the CI candidate manifest' }),
+  })
+}
+
+/** @param {{outputDirectory?: string|undefined, notes?: string|undefined, ciRun?: string|undefined}} options */
+async function packageRelease({ outputDirectory, notes, ciRun } = {}) {
+  const version = rootVersion(), channel = readChannel()
+  const publicEDKey = channel.publicEDKey
+  const output = path.resolve(outputDirectory || path.join(sourceRoot, 'build/release', version))
+  if (existsSync(output)) throw new Error(`Release output already exists: ${output}`)
+  if (ciRun !== undefined) return packageCiRelease({ runId: ciRun, output, notes, version, publicEDKey })
+  const sdk = ensureSparkleSdk()
+  const parent = path.dirname(output); mkdirSync(parent, { recursive: true })
+  const stage = mkdtempSync(path.join(parent, '.omp-release-'))
+  try {
+    await withReleaseApp({ outputDirectory: path.join(stage, 'build') }, ({ app, appTreeHash, sourceCommit }) => {
+      createPreparedPackage({ app, stage, version, notes: notes ?? `OMP Usage ${version}`, sourceCommit, currentFeed: existsSync(feedPath) ? readFileSync(feedPath, 'utf8') : emptyFeed(), appTreeHash, signer: keychainSigner(sdk, publicEDKey) })
+    })
     rmSync(path.join(stage, 'build'), { recursive: true, force: true })
     renameSync(stage, output)
   } finally {
     rmSync(stage, { recursive: true, force: true })
-    if (snapshot) rmSync(snapshot, { recursive: true, force: true })
   }
+  return output
+}
+
+/**
+ * Promotes an authenticated CI candidate: the exact DMG bytes GitHub built and attested are signed with the local Keychain key.
+ * Every check that can refuse (local checkout, version and release state, run, artifact, provenance) runs before the Sparkle SDK or the Keychain is touched.
+ * @param {{runId: string, output: string, notes: string|undefined, version: string, publicEDKey: string}} options
+ * @returns {Promise<string>}
+ */
+async function packageCiRelease({ runId, output, notes, version, publicEDKey }) {
+  const { appTreeHash } = await import('./ownership.mjs')
+  const { withVerifiedCandidate } = await import('./ci-release.mjs')
+  const head = requireCleanMain({ dryRun: false, dirty: 'Working tree must be clean before packaging a CI candidate', branch: 'Package a CI candidate from the main branch' })
+  gh('auth', 'status')
+  const currentFeed = verifyFeed(feedPath, publicEDKey)
+  assertNewerThanFeed(currentFeed, version)
+  assertNotReleased(version, head)
+  const parent = path.dirname(output); mkdirSync(parent, { recursive: true })
+  withTemporaryDirectory(parent, '.omp-release-', stage => withVerifiedCandidate({ runId, version, head }, candidate => {
+    prepareFromCandidate({ candidate, stage, version, notes: notes ?? `OMP Usage ${version}`, currentFeed, appTreeHash, signer: keychainSigner(ensureSparkleSdk(), publicEDKey) })
+    renameSync(stage, output)
+  }))
   return output
 }
 
@@ -234,6 +315,25 @@ function verifyArchive(archive, builtApp, appTreeHash) {
     if (hash !== appTreeHash(builtApp)) throw new Error('DMG mount changed the app tree')
     return hash
   })
+}
+
+/**
+ * Read-only mount check of one DMG that never executes the app: the exact payload layout, a universal deep-signed app, and an Info.plist
+ * version equal to `version`. Returns the app tree hash, which must equal `expectedAppTreeSHA256` when one is given
+ * (`expectedFrom` names where that value came from, for the refusal message).
+ * `hdiutil` replaces the system tool used to attach the image (the default is `/usr/bin/hdiutil`).
+ * @param {{file: string, version: string, appTreeHash: TreeHash, expectedAppTreeSHA256?: string|undefined, expectedFrom?: string, hdiutil?: Hdiutil | undefined}} options
+ * @returns {string}
+ */
+export function inspectArchive({ file, version, appTreeHash, expectedAppTreeSHA256, expectedFrom = 'the signed feed', hdiutil }) {
+  return withDmgApp(file, extracted => {
+    verifyUniversal(extracted)
+    const info = run('/usr/bin/plutil', ['-extract', 'CFBundleShortVersionString', 'raw', '-o', '-', path.join(extracted, 'Contents/Info.plist')]).trim()
+    if (info !== version) throw new Error(`Archive app version ${info} differs from ${version}`)
+    const hash = appTreeHash(extracted)
+    if (expectedAppTreeSHA256 !== undefined && hash !== expectedAppTreeSHA256) throw new Error(`Archive app tree hash differs from ${expectedFrom}`)
+    return hash
+  }, hdiutil ? { hdiutil } : undefined)
 }
 
 /** @param {string} item */
@@ -281,18 +381,14 @@ export function verifyPrepared({ output, version, notes, publicEDKey, currentFee
  * Authenticates one release asset against its signed feed item: length, Ed25519 signature over the exact bytes (checked before the
  * image is ever mounted), then a read-only mount that must hold exactly the app and install note, a universal deep-signed app of
  * the expected version, and the signed trusted tree hash. Returns the asset SHA-256.
- * @param {{file: string, item: ReturnType<typeof parseItem>, version: string, publicEDKey: string, appTreeHash: TreeHash}} options
+ * `hdiutil` replaces the system tool used to attach the image (the default is `/usr/bin/hdiutil`).
+ * @param {{file: string, item: ReturnType<typeof parseItem>, version: string, publicEDKey: string, appTreeHash: TreeHash, hdiutil?: Hdiutil | undefined}} options
  */
-export function verifyReleaseAsset({ file, item, version, publicEDKey, appTreeHash }) {
+export function verifyReleaseAsset({ file, item, version, publicEDKey, appTreeHash, hdiutil }) {
   const data = readFileSync(file)
   if (data.length !== item.length) throw new Error('Archive length differs from the signed feed')
   if (!verifySignature(data, item.signature, publicEDKey)) throw new Error('Archive signature does not verify against the pinned public key')
-  withDmgApp(file, extracted => {
-    verifyUniversal(extracted)
-    const info = run('/usr/bin/plutil', ['-extract', 'CFBundleShortVersionString', 'raw', '-o', '-', path.join(extracted, 'Contents/Info.plist')]).trim()
-    if (info !== version) throw new Error(`Archive app version ${info} differs from ${version}`)
-    if (appTreeHash(extracted) !== item.appTreeSHA256) throw new Error('Archive app tree hash differs from the signed feed')
-  })
+  inspectArchive({ file, version, appTreeHash, expectedAppTreeSHA256: item.appTreeSHA256, hdiutil })
   return createHash('sha256').update(data).digest('hex')
 }
 
@@ -305,22 +401,97 @@ function remoteTagMatches(tag, head) {
   return true
 }
 
+/** Throws unless the signed feed holds only versions older than `version`. @param {string} feedText @param {string} version */
+function assertNewerThanFeed(feedText, version) {
+  if (feedItems(feedText).some(item => itemVersion(item) === version)) throw new Error(`Version ${version} is already in the signed feed`)
+  for (const item of feedItems(feedText)) if (compareVersions(version, itemVersion(item)) <= 0) throw new Error(`Version ${version} is not newer than feed version ${itemVersion(item)}`)
+}
+
+/**
+ * A published version is never repackaged: an existing remote tag must already point at `head` and no GitHub release may exist for it.
+ * Only an explicit "release not found" answer counts as absent; any other failure (network, auth) refuses.
+ * @param {string} version @param {string} head
+ */
+function assertNotReleased(version, head) {
+  const tag = releaseTag(version)
+  remoteTagMatches(tag, head)
+  try { gh('release', 'view', tag, '--repo', defaults.repository) } catch (error) {
+    const detail = `${/** @type {{stderr?: unknown}} */ (error).stderr ?? ''}${error instanceof Error ? error.message : String(error)}`
+    if (/release not found/i.test(detail)) return
+    throw new Error(`Could not determine whether release ${tag} exists: ${detail.trim()}`)
+  }
+  throw new Error(`Release ${tag} already exists; a published version is never repackaged`)
+}
+
+/**
+ * Returns HEAD after requiring a clean tree on `main` that equals origin/main. Dry runs stay read-only: they compare with the remote
+ * branch tip via ls-remote instead of updating tracking refs.
+ * @param {{dryRun: boolean, dirty: string, branch: string}} options  `dirty` and `branch` are the refusal messages for a dirty tree and a branch other than main
+ */
+function requireCleanMain({ dryRun, dirty, branch }) {
+  if (git('status', '--porcelain')) throw new Error(dirty)
+  if (git('branch', '--show-current') !== 'main') throw new Error(branch)
+  if (!dryRun) git('fetch', 'origin', 'main')
+  const head = git('rev-parse', 'HEAD')
+  if (head !== (dryRun ? git('ls-remote', 'origin', 'refs/heads/main').split(/\s+/)[0] : git('rev-parse', 'origin/main'))) throw new Error('HEAD must equal origin/main (push or pull first)')
+  return head
+}
+
+/**
+ * Removes a temporary tree without ever descending into another filesystem: a volume mounted inside it is not ours to delete, so it stops
+ * the removal with an error instead of being traversed. Symbolic links are removed, never followed. A missing directory is already clean.
+ * @param {string} directory
+ */
+export function removeTemporaryTree(directory) {
+  /** @type {import('node:fs').Stats} */
+  let root
+  try { root = lstatSync(directory) } catch (error) { if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return; throw error }
+  if (!root.isDirectory()) { unlinkSync(directory); return }
+  const rootDevice = root.dev
+  /** @param {string} current */
+  const clear = current => {
+    for (const entry of readdirSync(current)) {
+      const target = path.join(current, entry), stat = lstatSync(target)
+      if (stat.dev !== rootDevice) throw new Error(`Refusing to delete ${target}: it is on a different filesystem (a mounted volume?)`)
+      if (stat.isDirectory()) { clear(target); rmdirSync(target) } else unlinkSync(target)
+    }
+  }
+  clear(directory)
+  rmdirSync(directory)
+}
+
+/**
+ * Runs `body` in a fresh private directory under `parent` and removes it afterwards with `removeTemporaryTree`. The directory is left in place
+ * when `body` failed with an uncertain DMG detach (its image may still be attached) and a failed removal never hides the original error.
+ * The body must be synchronous; it may move the directory away (the removal then finds nothing).
+ * @template T
+ * @param {string} parent @param {string} prefix @param {(directory: string) => T} body
+ * @returns {T}
+ */
+export function withTemporaryDirectory(parent, prefix, body) {
+  const directory = mkdtempSync(path.join(parent, prefix))
+  /** @type {{error: unknown} | undefined} */
+  let failure
+  /** @type {{value: T} | undefined} */
+  let result
+  try { result = { value: body(directory) } } catch (error) { failure = { error } }
+  if (!(failure?.error instanceof DmgCleanupError)) {
+    try { removeTemporaryTree(directory) } catch (error) { failure ??= { error } }
+  }
+  if (failure) throw failure.error
+  return /** @type {{value: T}} */ (result).value
+}
+
 /** @param {{notesFile:string, dryRun:boolean}} options */
 async function publish({ notesFile, dryRun }) {
   const { appTreeHash } = await import('./ownership.mjs')
   const version = rootVersion(), channel = readChannel(), publicEDKey = channel.publicEDKey
   const notes = readFileSync(path.resolve(notesFile), 'utf8').trim()
   if (!notes) throw new Error('Release notes file is empty')
-  if (git('status', '--porcelain')) throw new Error('Working tree must be clean before publishing')
-  if (git('branch', '--show-current') !== 'main') throw new Error('Publish from the main branch')
-  // Dry runs stay read-only: compare with the remote branch tip via ls-remote instead of updating tracking refs.
-  if (!dryRun) git('fetch', 'origin', 'main')
-  const head = git('rev-parse', 'HEAD')
-  if (head !== (dryRun ? git('ls-remote', 'origin', 'refs/heads/main').split(/\s+/)[0] : git('rev-parse', 'origin/main'))) throw new Error('HEAD must equal origin/main (push or pull first)')
+  const head = requireCleanMain({ dryRun, dirty: 'Working tree must be clean before publishing', branch: 'Publish from the main branch' })
   gh('auth', 'status')
   const feedText = verifyFeed(feedPath, publicEDKey)
-  if (feedItems(feedText).some(item => itemVersion(item) === version)) throw new Error(`Version ${version} is already in the signed feed`)
-  for (const item of feedItems(feedText)) if (compareVersions(version, itemVersion(item)) <= 0) throw new Error(`Version ${version} is not newer than feed version ${itemVersion(item)}`)
+  assertNewerThanFeed(feedText, version)
   const tag = releaseTag(version), tagExists = remoteTagMatches(tag, head)
   let releaseExists = true
   try { gh('release', 'view', tag, '--repo', defaults.repository) } catch { releaseExists = false }
@@ -383,11 +554,7 @@ async function prune({ keepVersion, dryRun }) {
   if (!/^\d+\.\d+\.\d+$/.test(keepVersion)) throw new Error(`--keep-version must be MAJOR.MINOR.PATCH, got ${JSON.stringify(keepVersion)}`)
   const { appTreeHash } = await import('./ownership.mjs')
   const channel = readChannel(), publicEDKey = channel.publicEDKey
-  if (git('status', '--porcelain')) throw new Error('Working tree must be clean before pruning')
-  if (git('branch', '--show-current') !== 'main') throw new Error('Prune from the main branch')
-  if (!dryRun) git('fetch', 'origin', 'main')
-  const head = git('rev-parse', 'HEAD'), remoteMain = () => dryRun ? git('ls-remote', 'origin', 'refs/heads/main').split(/\s+/)[0] : git('rev-parse', 'origin/main')
-  if (head !== remoteMain()) throw new Error('HEAD must equal origin/main (push or pull first)')
+  requireCleanMain({ dryRun, dirty: 'Working tree must be clean before pruning', branch: 'Prune from the main branch' })
   const localFeed = verifyFeed(feedPath, publicEDKey), { text: candidate, kept, removed } = prunedFeed(localFeed, keepVersion)
   const live = run('/usr/bin/curl', ['--fail', '--location', '--proto', '=https', '--silent', '--show-error', channel.feedURL])
   verifyFeedText(live, publicEDKey, channel.feedURL)
@@ -435,8 +602,8 @@ if (import.meta.main) {
   const [command, ...args] = process.argv.slice(2)
   if (command === 'setup') setup({ publicKey: parse(args, { 'public-key': 'value' }).values.get('public-key') })
   else if (command === 'package') {
-    const { values } = parse(args, { output: 'value', 'notes-file': 'value' }), notesFile = values.get('notes-file')
-    console.log(await packageRelease({ outputDirectory: values.get('output'), notes: notesFile ? readFileSync(path.resolve(notesFile), 'utf8').trim() : undefined }))
+    const { values } = parse(args, { output: 'value', 'notes-file': 'value', 'ci-run': 'value' }), notesFile = values.get('notes-file')
+    console.log(await packageRelease({ outputDirectory: values.get('output'), notes: notesFile ? readFileSync(path.resolve(notesFile), 'utf8').trim() : undefined, ciRun: values.get('ci-run') }))
   } else if (command === 'publish') {
     const { values, switches } = parse(args, { 'notes-file': 'value', 'dry-run': 'switch' }), notesFile = values.get('notes-file')
     if (!notesFile) throw new Error(usage)

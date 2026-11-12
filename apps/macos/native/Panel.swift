@@ -59,6 +59,8 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private var compactCards: [DashboardCard] = []
     private var compactIssue = ""
     private var compactCollecting = false
+    // `compactConnected` is the confirmed roster as of the latest render, which is what the compact plan uses.
+    private var compactConnected: Set<ExactString>?
     private var compactRevision = 0
     private var compactPlanRevision = -1
     private var compactPlanCapacities: CompactCapacities?
@@ -89,8 +91,11 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private var currentLayout: DockLayout?
     private var currentExpansion: CGFloat = 0
     private var dashboardSize: NSSize = .zero
-    private var result: PanelResult?
-    private var transportError: String?
+    // Accepted usage data, the latest failure shown beside it and the confirmed roster (see UsageIntake).
+    private var intake = UsageIntake()
+    private var result: PanelResult? { intake.result }
+    private var transportError: String? { intake.transportError }
+    private var roster: ConnectedProviders { intake.roster }
     private var refreshTimer: Timer?
     private var clockTimer: Timer?
     private var collecting = false
@@ -302,7 +307,8 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         config = next
         collector = Collector(configPath: path, config: next)
         bindCollector()
-        result = nil; transportError = nil; collecting = true
+        // A new profile/config source starts without accepted data or a confirmed roster.
+        intake.reset(); collecting = true
         // Account keys do not carry the profile, so selection and disclosure state must be reset explicitly,
         // including the hidden detail view.
         selectedAccount = nil; detailScope = .allAccounts
@@ -313,15 +319,15 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
     private func received(_ value: Result<PanelResult, Error>) {
         collecting = false
-        switch value {
-        case .success(let newResult):
-            if newResult.snapshot == nil, result?.snapshot != nil { transportError = newResult.error ?? "Usage is unavailable" }
-            else {
-                result = newResult; transportError = nil
-                // Membership is seeded before any compact render and independent of render holds.
-                compactStore.initializeSelectionIfNeeded(summaries: newResult.summaries)
-            }
-        case .failure(let error): transportError = error.localizedDescription
+        // One pure decision (UsageIntake) picks what a collector outcome may change: a failure or an answer older
+        // than the newest accepted data never replaces it, and its error stays visible beside it.
+        if intake.receive(value), let newResult = result {
+            // The data is the live source of truth: a detail scope for a provider it no longer reports must
+            // not outlive it (saved compact preferences are left alone so a reconnected provider returns).
+            let scope = ProviderDetailModel.reconciledScope(detailScope, connected: roster.known)
+            if scope != detailScope { detailScope = scope; selectedAccount = nil }
+            // Membership is seeded before any compact render and independent of render holds.
+            compactStore.initializeSelectionIfNeeded(summaries: newResult.summaries)
         }
         updateSettingsCatalog()
         generalSettings.updateCatalog(result: result)
@@ -344,6 +350,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         let content = DashboardModel.make(result: result, issue: freshness, collecting: collecting, showPace: config.showPace)
         // The compact selection is separate from `content`, which stays complete for the overview/detail.
         compactCards = content.cards
+        compactConnected = roster.known
         compactIssue = freshness
         compactCollecting = collecting
         compactRevision += 1
@@ -359,7 +366,8 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
             || (compactLeftItems.isEmpty && compactRightItems.isEmpty) {
             let plan = CompactSlotPlanner.plan(cards: compactCards, preferences: compactStore.preferences,
                                                physicalCapacity: capacities, aliases: config.labels,
-                                               issue: compactIssue, collecting: compactCollecting)
+                                               issue: compactIssue, collecting: compactCollecting,
+                                               connectedProviders: compactConnected)
             compactPlanRevision = compactRevision; compactPlanCapacities = capacities
             compactPlan = plan
             rebuildCompactViews()
@@ -704,8 +712,11 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         selectedAccount = detail.configure(result: result, scope: detailScope, selectedAccount: selectedAccount,
                                            config: config, collecting: collecting, transportError: transportError, now: Date())
     }
-    private func openDetail(scope: DetailScope) {
+    private func openDetail(scope requested: DetailScope) {
         cancelHover()
+        // A provider menu opened before a refresh removed its provider can still deliver that choice after the
+        // refresh landed (rendering is held while a menu tracks); the current roster decides, not the stale menu.
+        let scope = ProviderDetailModel.reconciledScope(requested, connected: roster.known)
         if detailScope != scope { selectedAccount = nil }
         detailScope = scope; showingDetail = true
         interaction.setPinned(true)

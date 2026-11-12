@@ -683,12 +683,14 @@ private func runCompactSlotPlannerTests() {
     func plan(_ cards: [DashboardCard], _ selected: [String]?, max: Int, capacity: Int = 1000,
               capacities: CompactCapacities? = nil, defaultSide: CompactWingSide = .right,
               sides: [String: CompactWingSide] = [:],
-              aliases: ExactConfigMap = [:], issue: String = "") -> CompactSlotPlan {
+              aliases: ExactConfigMap = [:], issue: String = "",
+              connected: [String]? = nil) -> CompactSlotPlan {
         CompactSlotPlanner.plan(cards: cards,
                                 preferences: CompactPreferences(maximumVisibleSlots: max, selectedProviderIDs: selected,
                                                                 defaultSide: defaultSide, providerSides: sides),
                                 physicalCapacity: capacities ?? uniformCapacity(capacity),
-                                aliases: aliases, issue: issue)
+                                aliases: aliases, issue: issue,
+                                connectedProviders: connected.map { Set($0.map(\.exactKey)) })
     }
     let cards = ["a", "b", "c", "d", "e", "f"].map { compactTestCard($0) }
 
@@ -871,6 +873,62 @@ private func runCompactSlotPlannerTests() {
         preconditionFailure("Expected rings")
     }
     precondition(backed.isReported && lost.hasWarning && !lost.isOverLimit)
+
+    // A SUCCESSFUL collection that no longer reports a selected provider removes its ring; unknown connectivity
+    // (nil: first load, stale fallback, failed refresh) keeps the placeholder. The saved selection is never
+    // rewritten, so a reconnected provider returns in its upstream position on its own wing.
+    let everyone = ["a", "b", "c", "d", "e", "f"]
+    let withoutB = cards.filter { $0.provider != "b" }
+    let remaining = everyone.filter { $0 != "b" }
+    let selection = ["a", "b", "c"]
+    precondition(summary(plan(cards, selection, max: 5, connected: everyone)) == ["a", "b", "c"])
+    let removedB = plan(withoutB, selection, max: 5, connected: remaining)
+    precondition(summary(removedB) == ["a", "c"] && removedB.selectedCount == 2 && removedB.hiddenProviderIDs.isEmpty)
+    let unknownB = plan(withoutB, selection, max: 5, issue: failure)
+    guard case .provider(let placeholderB) = unknownB.slots[2] else { preconditionFailure("Expected ring") }
+    precondition(summary(unknownB) == ["a", "c", "b"] && !placeholderB.isReported && placeholderB.hasWarning)
+    // The freed slot is not left empty: a ghost no longer pushes a real provider behind More.
+    let fourSelected = ["a", "b", "c", "d"]
+    precondition(summary(plan(withoutB, fourSelected, max: 3)) == ["a", "c", "+2"])
+    let freed = plan(withoutB, fourSelected, max: 3, connected: remaining)
+    precondition(summary(freed) == ["a", "c", "d"] && freed.hiddenProviderIDs.isEmpty && freed.selectedCount == 3)
+    // Reconnecting restores the same selection, upstream order and wing override.
+    let back = plan(cards, selection, max: 5, sides: ["b": .left], connected: everyone)
+    precondition(wings(back) == (["b"], ["a", "c"]))
+    // Absent from the cards is not the same as disconnected: a connected provider hidden from the summaries
+    // keeps its placeholder.
+    precondition(summary(plan(withoutB, ["b"], max: 3, connected: everyone)) == ["b"])
+    // Every selected provider gone: the existing configure control with its own reason. An explicit empty choice
+    // and an uninitialized one keep theirs.
+    func configureReason(_ plan: CompactSlotPlan) -> CompactConfigurePresentation.Reason {
+        guard plan.slots.count == 1, case .configure(let control) = plan.slots[0] else { preconditionFailure("Expected configure") }
+        return control.reason
+    }
+    precondition(configureReason(plan(withoutB, ["b"], max: 3, connected: remaining)) == .noneConnected)
+    let allGone = plan([], selection, max: 5, connected: [])
+    precondition(configureReason(allGone) == .noneConnected && allGone.selectedCount == 0)
+    precondition(configureReason(plan(cards, [], max: 3, connected: everyone)) == .noneSelected)
+    precondition(configureReason(plan(cards, nil, max: 3, connected: everyone)) == .uninitialized)
+
+    // Provider identity is exact: a saved decomposed "café" is never rendered from, or kept alive by, a composed
+    // "café" card, and the two are separate selections/sides.
+    let composed = "caf\u{e9}", decomposed = "cafe\u{301}"
+    let composedCards = [compactTestCard(composed)]
+    let ghost = plan(composedCards, [decomposed], max: 3)
+    guard ghost.slots.count == 1, case .provider(let ghostRing) = ghost.slots[0] else { preconditionFailure("Expected ring") }
+    precondition(!ghostRing.isReported && ghostRing.provider.isExactlyEqual(to: decomposed))
+    // Known disconnected: the decomposed ID is dropped, not substituted by the composed card.
+    precondition(configureReason(plan(composedCards, [decomposed], max: 3, connected: [composed])) == .noneConnected)
+    // Both IDs selected: the composed one is backed by its card, the decomposed one is a placeholder of its own.
+    let bothIDs = plan(composedCards, [composed, decomposed], max: 3)
+    precondition(bothIDs.slots.count == 2 && bothIDs.selectedCount == 2)
+    guard case .provider(let composedRing) = bothIDs.slots[0], case .provider(let decomposedRing) = bothIDs.slots[1] else { preconditionFailure("Expected rings") }
+    precondition(composedRing.isReported && composedRing.provider.isExactlyEqual(to: composed))
+    precondition(!decomposedRing.isReported && decomposedRing.provider.isExactlyEqual(to: decomposed))
+    // Neither normalization nor the wing lookup merges them.
+    precondition(CompactPreferences(selectedProviderIDs: [composed, decomposed]).normalized.selectedProviderIDs?.count == 2)
+    let sided = CompactPreferences(defaultSide: .right, providerSides: [composed: .left])
+    precondition(sided.side(for: composed) == .left && sided.side(for: decomposed) == .right)
 }
 
 private func runCompactRingPresentationTests() {

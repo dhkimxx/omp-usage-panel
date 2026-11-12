@@ -96,6 +96,93 @@ struct ProviderSummary: Decodable {
 }
 struct PanelResult: Decodable { let snapshot: UsageSnapshot?; let source: String; let error: String?; let summaries: [ProviderSummary] }
 
+/// The last CONFIRMED set of connected providers for one collection source (profile/config). A SUCCESSFUL
+/// collection (snapshot present, source live or cache, no error; an empty roster counts) replaces it with every
+/// provider in its summaries, accounts and unavailable/disabled reports. A connected provider whose usage fetch
+/// failed is still listed (as an unavailable report), so only a provider with no remaining credentials is absent.
+/// A stale fallback, a result carrying an error, an unavailable result and a failed refresh prove nothing about
+/// absence: they leave the last confirmed set untouched, so a removed provider never reappears without an
+/// authoritative reconnect. `known == nil` means no roster was ever confirmed (first load, restart): callers keep
+/// their saved placeholders. In memory only; `reset()` on a genuine profile/config-source change.
+///
+/// `confirmedAt` is the snapshot time of the data that confirmed it. A collection can hand back an OLDER snapshot
+/// than one already accepted (the disk cache is best effort: after a failed cache write a later failure or cache
+/// hit returns the pre-removal file). Such data must neither replace what is shown nor move the roster backwards.
+struct ConnectedProviders: Equatable {
+    private(set) var known: Set<ExactString>?
+    private(set) var confirmedAt: Double?
+
+    enum Disposition: Equatable {
+        /// Show it and let it update the roster.
+        case accept
+        /// Older than the confirmed data: keep what is shown. `error` is the failure to surface, nil for a healthy
+        /// (cache) answer that merely carries older data.
+        case keepNewer(error: String?)
+    }
+
+    /// A live answer is fresh by construction and always accepted. Cache and stale answers are accepted unless their
+    /// snapshot predates the confirmed one; with nothing confirmed yet (first load) everything is accepted.
+    func disposition(of incoming: PanelResult) -> Disposition {
+        guard let confirmedAt, let snapshot = incoming.snapshot, incoming.source != "live",
+              snapshot.capturedAt < confirmedAt else { return .accept }
+        return .keepNewer(error: incoming.source == "stale" ? (incoming.error ?? "Usage refresh failed") : nil)
+    }
+
+    mutating func observe(_ result: PanelResult) {
+        guard let snapshot = result.snapshot, result.source == "live" || result.source == "cache",
+              (result.error ?? "").isEmpty else { return }
+        if result.source == "cache", let confirmedAt, snapshot.capturedAt < confirmedAt { return }
+        var ids = Set<ExactString>()
+        for summary in result.summaries { ids.insert(summary.provider.exactKey) }
+        for account in snapshot.accounts { ids.insert(account.provider.exactKey) }
+        for report in snapshot.unavailable { ids.insert(report.provider.exactKey) }
+        known = ids
+        confirmedAt = snapshot.capturedAt
+    }
+
+    mutating func reset() { known = nil; confirmedAt = nil }
+}
+
+/// What the panel shows and why: the accepted usage data, the latest collection failure to surface next to it, and
+/// the confirmed roster. One place decides what a collector outcome may change, so the compact row, overview,
+/// provider dropdown and account details all read the same accepted data.
+struct UsageIntake {
+    private(set) var result: PanelResult?
+    private(set) var transportError: String?
+    private(set) var roster = ConnectedProviders()
+
+    /// Returns true when `result` was replaced by this outcome.
+    @discardableResult
+    mutating func receive(_ value: Result<PanelResult, Error>) -> Bool {
+        switch value {
+        case .failure(let error):
+            transportError = error.localizedDescription
+            return false
+        case .success(let incoming):
+            if incoming.snapshot == nil, result?.snapshot != nil {
+                transportError = incoming.error ?? "Usage is unavailable"
+                return false
+            }
+            switch roster.disposition(of: incoming) {
+            case .keepNewer(let error):
+                // The newest accepted data stays; a stale fallback's failure stays visible beside it.
+                if let error { transportError = error }
+                return false
+            case .accept:
+                result = incoming
+                transportError = nil
+                roster.observe(incoming)
+                return true
+            }
+        }
+    }
+
+    /// A genuine profile/config-source change: nothing from the previous source may decide anything.
+    mutating func reset() {
+        result = nil; transportError = nil; roster.reset()
+    }
+}
+
 enum DisplayModel {
     static func number(_ value: Double?) -> String {
         guard let value = value, value.isFinite else { return "unknown" }

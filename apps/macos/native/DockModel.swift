@@ -582,16 +582,26 @@ struct CompactMorePresentation: Equatable {
 }
 
 struct CompactConfigurePresentation: Equatable {
+    // Why no ring is shown: no choice was ever made, an explicit empty choice, or a saved choice whose providers
+    // the latest successful collection no longer reports.
+    enum Reason: Equatable { case uninitialized, noneSelected, noneConnected }
+
+    let reason: Reason
     let hasIssue: Bool
     let tooltip: String
     let accessibilityLabel: String
 
-    init(uninitialized: Bool, issue: String, collecting: Bool) {
+    init(reason: Reason, issue: String, collecting: Bool) {
+        self.reason = reason
         let issue = issue.trimmingCharacters(in: .whitespacesAndNewlines)
         hasIssue = !issue.isEmpty
-        var lines = ["Compact display settings",
-                     uninitialized ? "Choose which providers appear here"
-                                   : "No providers selected — choose which providers appear here"]
+        let hint: String
+        switch reason {
+        case .uninitialized: hint = "Choose which providers appear here"
+        case .noneSelected: hint = "No providers selected — choose which providers appear here"
+        case .noneConnected: hint = "No selected provider is connected — choose which providers appear here"
+        }
+        var lines = ["Compact display settings", hint]
         if collecting { lines.append("Collecting usage…") }
         if hasIssue { lines.append(issue) }
         tooltip = lines.joined(separator: "\n")
@@ -637,22 +647,32 @@ enum CompactSlotPlanner {
     // On overflow one slot is reserved for More on the wing of the first provider that cannot be
     // shown; the remaining providers are then chosen greedily in their existing order. More lists
     // every hidden provider, whichever wing it prefers.
+    //
+    // `connectedProviders` is the last roster a successful collection CONFIRMED (nil until one did: first load,
+    // restart; see ConnectedProviders, which keeps it through later stale/failed refreshes). A selected provider
+    // the cards lack is drawn as a not-reported placeholder only while no roster is known; once it is known to be
+    // disconnected it is simply not drawn. The saved selection is never rewritten, so a provider that
+    // reconnects returns to its place.
     static func plan(cards: [DashboardCard], preferences: CompactPreferences,
                      physicalCapacity: CompactCapacities,
                      aliases: ExactConfigMap = [:], issue: String = "",
-                     collecting: Bool = false) -> CompactSlotPlan {
+                     collecting: Bool = false,
+                     connectedProviders: Set<ExactString>? = nil) -> CompactSlotPlan {
         let preferences = preferences.normalized
         let selected = preferences.selectedProviderIDs ?? []
-        let selectedSet = Set(selected)
-        var firstCard: [String: DashboardCard] = [:]
-        for card in cards where firstCard[card.provider] == nil { firstCard[card.provider] = card }
-        // Current upstream order first; selected IDs the data lacks follow in selection order.
+        // Membership is by exact string identity (never Swift canonical equivalence), like every provider ID.
+        let selectedSet = Set(selected.map(\.exactKey))
+        var firstCard: [ExactString: DashboardCard] = [:]
+        for card in cards where firstCard[card.provider.exactKey] == nil { firstCard[card.provider.exactKey] = card }
+        // Current upstream order first; selected IDs the data lacks (and that are not known to be
+        // disconnected) follow in selection order.
+        func stillConnected(_ id: String) -> Bool { connectedProviders?.contains(id.exactKey) ?? true }
         var entries: [CompactRingPresentation] = []
-        var included = Set<String>()
-        for card in cards where selectedSet.contains(card.provider) && included.insert(card.provider).inserted {
+        var included = Set<ExactString>()
+        for card in cards where selectedSet.contains(card.provider.exactKey) && included.insert(card.provider.exactKey).inserted {
             entries.append(CompactRingPresentation(card: card))
         }
-        for id in selected where firstCard[id] == nil {
+        for id in selected where firstCard[id.exactKey] == nil && stillConnected(id) {
             entries.append(CompactRingPresentation(missingProvider: id, label: aliases[id] ?? id, issue: issue))
         }
         let sides = entries.map { preferences.side(for: $0.provider) }
@@ -662,8 +682,10 @@ enum CompactSlotPlanner {
         var rightLimit = max(0, physicalCapacity.right)
         if leftLimit == 0 && rightLimit == 0 { rightLimit = 1 }
         guard !entries.isEmpty else {
+            let reason: CompactConfigurePresentation.Reason = preferences.selectedProviderIDs == nil ? .uninitialized
+                : selected.isEmpty ? .noneSelected : .noneConnected
             let configure = [CompactSlot.configure(CompactConfigurePresentation(
-                uninitialized: preferences.selectedProviderIDs == nil, issue: issue, collecting: collecting))]
+                reason: reason, issue: issue, collecting: collecting))]
             // The default wing, unless it has no physical room at all.
             let onLeft = preferences.defaultSide == .left ? leftLimit > 0 : rightLimit == 0
             return CompactSlotPlan(leftSlots: onLeft ? configure : [], rightSlots: onLeft ? [] : configure,

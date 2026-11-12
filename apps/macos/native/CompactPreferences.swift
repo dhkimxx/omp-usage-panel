@@ -21,7 +21,7 @@ struct CompactPreferences: Codable, Equatable {
     }
 
     func side(for providerID: String) -> CompactWingSide {
-        providerSides[providerID] ?? defaultSide
+        providerSides.first { $0.key.isExactlyEqual(to: providerID) }?.value ?? defaultSide
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -59,8 +59,8 @@ struct CompactPreferences: Codable, Equatable {
 
     /// Positive slot count and de-duplicated IDs (first occurrence wins, IDs never rewritten).
     var normalized: CompactPreferences {
-        var seen = Set<String>()
-        let ids = selectedProviderIDs?.filter { seen.insert($0).inserted }
+        var seen = Set<ExactString>()
+        let ids = selectedProviderIDs?.filter { seen.insert($0.exactKey).inserted }
         return CompactPreferences(maximumVisibleSlots: max(1, maximumVisibleSlots), selectedProviderIDs: ids,
                                   defaultSide: defaultSide, providerSides: providerSides)
     }
@@ -148,12 +148,12 @@ final class CompactPreferencesStore {
     @discardableResult
     func initializeSelectionIfNeeded(summaries: [ProviderSummary]) -> Bool {
         guard preferences.selectedProviderIDs == nil else { return false }
-        var seen = Set<String>()
+        var seen = Set<ExactString>()
         var seed: [String] = []
         for summary in summaries {
             if seed.count >= preferences.maximumVisibleSlots { break }
             guard summary.accountCount > 0, let percent = summary.percent, percent.isFinite, percent >= 0 else { continue }
-            if seen.insert(summary.provider).inserted { seed.append(summary.provider) }
+            if seen.insert(summary.provider.exactKey).inserted { seed.append(summary.provider) }
         }
         guard !seed.isEmpty else { return false }
         var updated = preferences

@@ -159,6 +159,14 @@ enum ProviderDetailModel {
         return (providers, labels)
     }
 
+    /// A provider scope the latest successful collection no longer reports falls back to All, so the dropdown and
+    /// the open detail stop showing a removed provider. `connected == nil` (nothing trustworthy to compare with)
+    /// and the All scope never change.
+    static func reconciledScope(_ scope: DetailScope, connected: Set<ExactString>?) -> DetailScope {
+        guard let connected, case let .provider(provider) = scope, !connected.contains(provider.exactKey) else { return scope }
+        return .allAccounts
+    }
+
     static func make(result: PanelResult?, scope: DetailScope, selectedAccount: DetailAccountKey?,
                      config: PanelConfig, collecting: Bool, transportError: String?) -> ProviderDetailContent {
         let (providers, labels) = catalog(result: result, scope: scope, config: config)

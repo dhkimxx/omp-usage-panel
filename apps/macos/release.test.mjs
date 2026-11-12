@@ -1,13 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash, generateKeyPairSync, sign as cryptoSign } from 'node:crypto'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { dmgAppName, dmgNote, dmgNoteName } from './dmg.mjs'
+import { DmgCleanupError, createDmg, dmgAppName, dmgNote, dmgNoteName } from './dmg.mjs'
 import { appTreeHash } from './ownership.mjs'
-import { archiveName, createPreparedPackage, downloadURL, emptyFeed, feedItems, parseItem, prunedFeed, verifyFeedText, verifyPrepared, verifyReleaseAsset } from './release.mjs'
+import { archiveName, createPreparedPackage, downloadURL, emptyFeed, feedItems, parseItem, prepareFromCandidate, prunedFeed, removeTemporaryTree, verifyFeedText, verifyPrepared, verifyReleaseAsset, withTemporaryDirectory } from './release.mjs'
+import { buildFixtureApp, inTemp, recordingHdiutil, signerFor } from './release-fixtures.mjs'
 
 // Real consumer boundaries: a universal ad-hoc-signed fixture app, a real compressed DMG attached read-only through hdiutil,
 // and Ed25519 signatures verified by the production code. Only the Keychain-backed signer is replaced by an in-process key.
@@ -18,18 +18,6 @@ const { privateKey, publicKey } = generateKeyPairSync('ed25519')
 const publicEDKey = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64')
 const otherKey = generateKeyPairSync('ed25519').privateKey
 
-/** @param {import('node:crypto').KeyObject} key */
-function signerFor(key) {
-  return {
-    /** @param {string} file */
-    signArchive(file) { const data = readFileSync(file); return { signature: cryptoSign(null, data, key).toString('base64'), length: data.length } },
-    /** @param {string} file */
-    signFeed(file) {
-      const text = readFileSync(file, 'utf8'), data = Buffer.from(text)
-      writeFileSync(file, `${text}<!-- sparkle-signatures:\nedSignature: ${cryptoSign(null, data, key).toString('base64')}\nlength: ${data.length}\n-->\n`)
-    },
-  }
-}
 /** @typedef {ReturnType<typeof signerFor>} TestSigner */
 /** @type {TestSigner} */
 const signer = signerFor(privateKey)
@@ -51,20 +39,6 @@ const legacyItem = `<item>
 // The deployed feed carries ZIP-era items; a candidate must extend it verbatim.
 const currentFeed = emptyFeed().replace('  </channel>', `    ${legacyItem}\n  </channel>`)
 
-/** Universal (arm64 + x86_64), ad-hoc deep-signed app. @param {string} directory @param {{version?: string, universal?: boolean}} [options] */
-function buildFixtureApp(directory, { version: appVersion = version, universal = true } = {}) {
-  const root = path.join(directory, `app-${appVersion}-${universal}`), app = path.join(root, dmgAppName)
-  mkdirSync(path.join(app, 'Contents/MacOS'), { recursive: true })
-  writeFileSync(path.join(app, 'Contents/Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>OMPUsagePanel</string><key>CFBundleIdentifier</key><string>com.example.omp-usage-fixture</string><key>CFBundleName</key><string>OMP Usage</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${appVersion}</string><key>CFBundleVersion</key><string>${appVersion}</string></dict></plist>\n`)
-  const source = path.join(root, 'main.c')
-  writeFileSync(source, 'int main(void) { return 0; }\n')
-  execFileSync('/usr/bin/xcrun', ['clang', ...(universal ? ['-arch', 'arm64', '-arch', 'x86_64'] : ['-arch', process.arch === 'arm64' ? 'arm64' : 'x86_64']), '-o', path.join(app, 'Contents/MacOS/OMPUsagePanel'), source], { stdio: 'pipe' })
-  rmSync(source)
-  mkdirSync(path.join(app, 'Contents/Resources')); writeFileSync(path.join(app, 'Contents/Resources/data.txt'), 'resource')
-  execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'pipe' })
-  return app
-}
-
 /**
  * @param {string} directory @param {{app?: string, sourceCommit?: string|undefined, name?: string, packageNotes?: string}} [options]
  * @returns {string} prepared package directory
@@ -80,11 +54,6 @@ function prepare(directory, options = {}) {
 }
 /** @param {string} output @param {Partial<Parameters<typeof verifyPrepared>[0]>} [overrides] */
 const verify = (output, overrides = {}) => verifyPrepared({ output, version, notes, publicEDKey, currentFeed, appTreeHash, head, ...overrides })
-/** @param {(directory: string) => void | Promise<void>} body */
-async function inTemp(body) {
-  const directory = mkdtempSync(path.join(tmpdir(), 'omp-release-test-'))
-  try { await body(directory) } finally { rmSync(directory, { recursive: true, force: true }) }
-}
 /** Replaces text in the signed candidate feed and signs it again with `signWith`. @param {string} output @param {(feed: string) => string} mutate @param {TestSigner} [signWith] */
 function rewriteFeed(output, mutate, signWith = signer) {
   const file = path.join(output, 'appcast.xml')
@@ -196,4 +165,117 @@ test('pruning keeps exactly the signed kept item and verifies the retained publi
   assert.throws(() => verifyReleaseAsset({ file: truncated, item, version, publicEDKey, appTreeHash }), /length differs/)
   const wrongHash = path.join(directory, 'copy.dmg'); copyFileSync(asset, wrongHash)
   assert.throws(() => verifyReleaseAsset({ file: wrongHash, item: { ...item, appTreeSHA256: '1'.repeat(64) }, version, publicEDKey, appTreeHash }), /tree hash differs/)
+}))
+
+test('an archive signed with another key is rejected before the image is ever attached; the right signature attaches it and verifies it', darwin, () => inTemp(directory => {
+  const output = prepare(directory), asset = path.join(output, archiveName(version)), bytes = readFileSync(asset)
+  const item = parseItem(/** @type {string} */ (feedItems(readFileSync(path.join(output, 'appcast.xml'), 'utf8')).at(-1)))
+  // The same structurally valid image of the signed length: only the signing key differs from the trusted one.
+  const hostile = { ...item, signature: signerFor(otherKey).signArchive(asset).signature }
+  const refusal = recordingHdiutil()
+  assert.throws(() => verifyReleaseAsset({ file: asset, item: hostile, version, publicEDKey, appTreeHash, hdiutil: refusal.hdiutil }))
+  assert.deepEqual(refusal.attached, [], 'no image was attached before its signature was verified')
+  const accepted = recordingHdiutil()
+  assert.equal(verifyReleaseAsset({ file: asset, item, version, publicEDKey, appTreeHash, hdiutil: accepted.hdiutil }), createHash('sha256').update(bytes).digest('hex'))
+  assert.deepEqual(accepted.attached, [asset], 'the correctly signed image was attached read-only exactly once and inspected')
+}))
+
+// ---- CI candidate promotion: the DMG bytes GitHub built and attested are the bytes that get signed.
+/** @param {string} file */
+const sha256Of = file => createHash('sha256').update(readFileSync(file)).digest('hex')
+/** @typedef {Parameters<typeof prepareFromCandidate>[0]['candidate']} Candidate */
+/**
+ * An image built the way CI builds it. Compressed images are not reproducible, so this one file is the only authority for "the bytes".
+ * @param {string} directory @param {{app?: string, name?: string, manifestTree?: string}} [options]
+ * @returns {Candidate}
+ */
+function ciCandidate(directory, { app = buildFixtureApp(directory), name = 'candidate', manifestTree = appTreeHash(app) } = {}) {
+  const folder = path.join(directory, name); mkdirSync(folder)
+  const archive = createDmg({ app, output: path.join(folder, archiveName(version)) })
+  return { archivePath: archive, sha256: sha256Of(archive), manifest: { sourceCommit: head, appTreeSHA256: manifestTree }, provenance: { runId: '4242', runAttempt: 1, event: 'workflow_dispatch', ref: 'refs/heads/main' } }
+}
+/** A signer that records the digest of every archive it is asked to sign. */
+function spySigner() {
+  /** @type {string[]} */
+  const signed = []
+  /** @param {string} file */
+  const signArchive = file => { signed.push(sha256Of(file)); return signer.signArchive(file) }
+  return { signed, signArchive, signFeed: signer.signFeed }
+}
+
+test('a CI candidate is signed as the exact attested bytes and then passes the normal publish verification', darwin, () => inTemp(directory => {
+  const candidate = ciCandidate(directory), original = readFileSync(candidate.archivePath)
+  const stage = path.join(directory, 'package'); mkdirSync(stage)
+  const spy = spySigner()
+  const prepared = prepareFromCandidate({ candidate, stage, version, notes, currentFeed, appTreeHash, signer: spy, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000' })
+  const archive = path.join(stage, archiveName(version))
+  assert.ok(readFileSync(archive).equals(original), 'the staged DMG is byte-identical to the authenticated candidate, not a rebuild')
+  assert.deepEqual(spy.signed, [candidate.sha256], 'the update signature was made over exactly the authenticated bytes')
+  assert.equal(prepared.sha256, candidate.sha256)
+  assert.equal(prepared.appTreeSHA256, candidate.manifest.appTreeSHA256)
+  const verified = verify(stage)
+  assert.equal(verified.sha256, candidate.sha256, 'the publish-time verification accepts the promoted package')
+  assert.equal(verified.url, downloadURL(version))
+  const record = JSON.parse(readFileSync(path.join(stage, 'release.json'), 'utf8'))
+  assert.equal(record.archiveSHA256, candidate.sha256); assert.equal(record.sourceCommit, head); assert.equal(record.ci.runId, '4242')
+  const item = parseItem(/** @type {string} */ (feedItems(readFileSync(path.join(stage, 'appcast.xml'), 'utf8')).at(-1)))
+  assert.equal(item.sourceCommit, head); assert.equal(item.length, original.length)
+  assert.ok(readFileSync(candidate.archivePath).equals(original), 'the downloaded candidate itself is never modified')
+  assert.throws(() => verify(stage, { head: 'b'.repeat(40) }), 'a package promoted for another commit cannot be published from this checkout')
+}))
+
+test('a CI candidate that fails inspection or differs from the authenticated bytes is refused before anything is signed', darwin, () => inTemp(directory => {
+  const app = buildFixtureApp(directory)
+  /** @param {Candidate} candidate @param {string} label */
+  const refused = (candidate, label) => {
+    const stage = mkdtempSync(path.join(directory, 'stage-')), spy = spySigner()
+    assert.throws(() => prepareFromCandidate({ candidate, stage, version, notes, currentFeed, appTreeHash, signer: spy }), label)
+    assert.deepEqual(spy.signed, [], `${label}: the signing key was never used`)
+    assert.deepEqual(readdirSync(stage), [archiveName(version)], `${label}: no feed or release record was produced`)
+  }
+  refused(ciCandidate(directory, { app, name: 'wrong-tree', manifestTree: '0'.repeat(64) }), 'a manifest tree hash that is not the image\'s')
+  refused(ciCandidate(directory, { app: buildFixtureApp(directory, { version: '0.9.0' }), name: 'wrong-version' }), 'an app of another version')
+  refused(ciCandidate(directory, { app: buildFixtureApp(directory, { universal: false }), name: 'thin' }), 'a single-architecture app')
+  const swapped = ciCandidate(directory, { app, name: 'swapped' }); appendFileSync(swapped.archivePath, Buffer.from([0]))
+  refused(swapped, 'bytes that changed after authentication')
+  const folder = path.join(directory, 'extra'), payload = mkdtempSync(path.join(directory, 'payload-')), extra = path.join(folder, archiveName(version))
+  mkdirSync(folder)
+  execFileSync('/usr/bin/ditto', [app, path.join(payload, dmgAppName)]); writeFileSync(path.join(payload, dmgNoteName), dmgNote); writeFileSync(path.join(payload, 'README.txt'), 'x')
+  execFileSync('/usr/bin/hdiutil', ['create', '-quiet', '-srcfolder', payload, '-volname', 'OMP Usage', '-fs', 'HFS+', '-format', 'UDZO', extra])
+  refused({ archivePath: extra, sha256: sha256Of(extra), manifest: { sourceCommit: head, appTreeSHA256: appTreeHash(app) }, provenance: {} }, 'an extra file in the image')
+  const stage = mkdtempSync(path.join(directory, 'stage-')), good = ciCandidate(directory, { app, name: 'good' })
+  /** @param {string} file */
+  const rewriteAndSign = file => { appendFileSync(file, Buffer.from([0])); return signer.signArchive(file) }
+  const rewriting = { signArchive: rewriteAndSign, signFeed: signer.signFeed }
+  assert.throws(() => prepareFromCandidate({ candidate: good, stage, version, notes, currentFeed, appTreeHash, signer: rewriting }), 'a signer that rewrites the archive')
+}))
+
+test('temporary cleanup never reaches into a mounted volume and never follows links', darwin, () => inTemp(directory => {
+  const dmg = createDmg({ app: buildFixtureApp(directory), output: path.join(directory, 'volume.dmg') })
+  const scratch = path.join(directory, 'scratch'), mount = path.join(scratch, 'mount'), outside = path.join(directory, 'outside')
+  mkdirSync(mount, { recursive: true }); mkdirSync(outside); writeFileSync(path.join(outside, 'keep.txt'), 'keep')
+  symlinkSync(outside, path.join(scratch, 'link'))
+  execFileSync('/usr/bin/hdiutil', ['attach', '-quiet', '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', mount, dmg])
+  try {
+    assert.throws(() => removeTemporaryTree(scratch), 'removal stops at a mounted volume')
+    assert.equal(readFileSync(path.join(mount, dmgNoteName), 'utf8'), dmgNote, 'the mounted volume was not touched')
+  } finally { execFileSync('/usr/bin/hdiutil', ['detach', '-quiet', mount]) }
+  removeTemporaryTree(scratch)
+  assert.equal(existsSync(scratch), false, 'once nothing is mounted the tree is removed')
+  assert.equal(readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'keep', 'a link is removed, its target is never followed')
+  removeTemporaryTree(scratch)
+}))
+
+test('withTemporaryDirectory removes its directory unless a DMG detach is uncertain and never hides the original failure', () => inTemp(directory => {
+  let seen = ''
+  const failure = new Error('original operation failed')
+  assert.throws(() => withTemporaryDirectory(directory, 'a-', created => { seen = created; writeFileSync(path.join(created, 'x'), '1'); throw failure }), error => error === failure)
+  assert.equal(existsSync(seen), false)
+  assert.throws(() => withTemporaryDirectory(directory, 'b-', created => { seen = created; throw new DmgCleanupError('detach uncertain', { devices: ['/dev/disk9'], mountPoint: '/x' }) }), DmgCleanupError)
+  assert.equal(existsSync(seen), true, 'a directory whose image may still be attached is left in place')
+  assert.equal(withTemporaryDirectory(directory, 'c-', created => { seen = created; return 7 }), 7)
+  assert.equal(existsSync(seen), false)
+  const moved = path.join(directory, 'moved')
+  withTemporaryDirectory(directory, 'd-', created => renameSync(created, moved))
+  assert.equal(existsSync(moved), true, 'a directory the body moved away is not touched')
 }))

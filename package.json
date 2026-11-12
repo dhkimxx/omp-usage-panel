@@ -16,7 +16,10 @@
     "release:setup": "node apps/macos/release.mjs setup",
     "release:package": "node apps/macos/release.mjs package",
     "release:publish": "node apps/macos/release.mjs publish",
-    "release:prune": "node apps/macos/release.mjs prune"
+    "release:prune": "node apps/macos/release.mjs prune",
+    "release:ci-build": "node apps/macos/ci-release.mjs build",
+    "release:verify-ci": "node apps/macos/ci-release.mjs verify",
+    "release:audit": "node apps/macos/release-audit.mjs"
   },
   "devDependencies": {
     "@types/node": "22.20.5",

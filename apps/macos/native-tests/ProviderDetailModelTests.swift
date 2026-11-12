@@ -164,4 +164,63 @@ func runProviderDetailModelTests() {
     let missingSnapshot = PanelResult(snapshot: nil, source: "unavailable", error: "No snapshot",
                                       summaries: [summary("p")])
     precondition(content(missingSnapshot, scope: .provider("p")).choices.isEmpty)
+
+    // The roster is what successive collections CONFIRMED. Sequences go through the same `observe` the panel uses.
+    func roster(_ results: [PanelResult]) -> Set<ExactString>? {
+        var tracker = ConnectedProviders()
+        for result in results { tracker.observe(result) }
+        return tracker.known
+    }
+    // A provider scope the latest SUCCESSFUL collection no longer reports falls back to All, so neither the open
+    // detail nor the provider dropdown keeps a removed provider.
+    let afterRemoval = result([a], summaries: [summary("p")])
+    let connected = roster([afterRemoval])
+    precondition(ProviderDetailModel.reconciledScope(.provider("q"), connected: connected) == .allAccounts)
+    precondition(ProviderDetailModel.reconciledScope(.provider("p"), connected: connected) == .provider("p"))
+    precondition(ProviderDetailModel.reconciledScope(.allAccounts, connected: connected) == .allAccounts)
+    let reconciled = ProviderDetailModel.reconciledScope(.provider("q"), connected: connected)
+    precondition(ProviderDetailModel.catalog(result: afterRemoval, scope: reconciled, config: config()).providers.map(\.scope)
+                 == [.allAccounts, .provider("p")])
+    // The catalog itself still lists a requested scope, so the reconciliation above is what removes the ghost.
+    precondition(ProviderDetailModel.catalog(result: afterRemoval, scope: .provider("q"), config: config()).providers.map(\.scope)
+                 == [.allAccounts, .provider("p"), .provider("q")])
+    // Before any confirmed roster nothing is known, whatever the result: first load, stale fallback, an error, no
+    // snapshot. The scope is kept.
+    let staleResult = result([a], source: "stale", error: "Refresh failed")
+    for unconfirmed in [[staleResult], [missingSnapshot], [result([a], error: "Provider failed")], []] {
+        let known = roster(unconfirmed)
+        precondition(known == nil)
+        precondition(ProviderDetailModel.reconciledScope(.provider("q"), connected: known) == .provider("q"))
+    }
+    // Once a roster is confirmed, later stale, failed or unavailable results never change it, so a removed
+    // provider cannot be restored by a transient failure; a successful result replaces it, including the
+    // reconnect of the removed provider.
+    let both = result([a, other], summaries: [summary("p"), summary("q")])
+    let removedQ = result([a], summaries: [summary("p")])
+    let stillP = Set(["p".exactKey])
+    precondition(roster([both, removedQ]) == stillP)
+    precondition(roster([both, removedQ, staleResult]) == stillP)
+    precondition(roster([both, removedQ, missingSnapshot, staleResult]) == stillP)
+    precondition(ProviderDetailModel.reconciledScope(.provider("q"), connected: roster([both, removedQ, staleResult])) == .allAccounts)
+    precondition(roster([both, removedQ, staleResult, both]) == Set(["p".exactKey, "q".exactKey]))
+    // An empty successful roster is a confirmed roster: a later failure does not bring any provider back.
+    let emptyLive = result([])
+    precondition(roster([both, emptyLive]) == Set<ExactString>())
+    precondition(roster([both, emptyLive, staleResult]) == Set<ExactString>())
+    precondition(ProviderDetailModel.reconciledScope(.provider("p"), connected: roster([both, emptyLive, staleResult])) == .allAccounts)
+    // A source change starts over.
+    var tracker = ConnectedProviders()
+    tracker.observe(removedQ); tracker.reset(); tracker.observe(staleResult)
+    precondition(tracker.known == nil)
+    // A provider whose usage could not be fetched is still connected (an unavailable report), as is one with a
+    // single remaining account; a fresh cache counts as a collection.
+    let degraded = result([a], reports: [UsageUnavailable(provider: "q", label: "gone", reason: "Expired")],
+                          summaries: [summary("p"), summary("q")])
+    precondition(ProviderDetailModel.reconciledScope(.provider("q"), connected: roster([degraded])) == .provider("q"))
+    precondition(roster([result([a, b])]) == stillP && roster([result([b])]) == stillP)
+    precondition(roster([result([a], source: "cache")]) == stillP)
+    // Provider IDs compare exactly, never by Unicode canonical equivalence.
+    let composed = "caf\u{e9}", decomposed = "cafe\u{301}"
+    precondition(ProviderDetailModel.reconciledScope(.provider(decomposed), connected: roster([result([account(composed, "x")])]))
+                 == .allAccounts)
 }
