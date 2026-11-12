@@ -19,6 +19,7 @@ struct SettingsCommit: Equatable {
     let config: PanelConfig
     let updatePolicy: UpdatePolicy
     let compactChanges: [ScopedCompactChange]
+    let placement: PanelPlacementPreferences
 }
 
 /// Staged compact-view editing state for ONE profile scope. `maximumText` is kept as typed so invalid text is
@@ -276,6 +277,8 @@ struct GeneralSettingsDraft: Equatable {
     var showPace: Bool
     /// Staged app-wide updater choices. They are committed separately from `PanelConfig` (different store).
     var updatePolicy: UpdatePolicy
+    /// Staged panel monitor choice (`displayUUID == nil` follows the System primary display).
+    var placement: PanelPlacementPreferences
     /// Automatic (`providers: null`) versus Custom (an ordered array, possibly empty). Rows survive mode switches.
     var providerMode: ProviderMode
     private(set) var providerRows: [Row] = []
@@ -287,7 +290,8 @@ struct GeneralSettingsDraft: Equatable {
     private(set) var compactDrafts: [String: CompactSettingsDraft] = [:]
     private var compactScopeOrder: [String] = []
 
-    init(config: PanelConfig, updatePolicy: UpdatePolicy = .defaults, compactSnapshot: CompactSettingsSnapshot? = nil) {
+    init(config: PanelConfig, updatePolicy: UpdatePolicy = .defaults, placement: PanelPlacementPreferences = .defaults, compactSnapshot: CompactSettingsSnapshot? = nil) {
+        self.placement = placement
         version = config.version
         nodePath = config.nodePath
         ompPath = config.ompPath
@@ -310,14 +314,14 @@ struct GeneralSettingsDraft: Equatable {
 
     /// True when the staged values differ from the committed ones. Row identities and raw text typed-then-reverted
     /// are ignored: only the resulting values count. Used to refuse an update restart that would drop edits.
-    func hasChanges(from config: PanelConfig, updatePolicy committedPolicy: UpdatePolicy) -> Bool {
-        let base = GeneralSettingsDraft(config: config, updatePolicy: committedPolicy)
+    func hasChanges(from config: PanelConfig, updatePolicy committedPolicy: UpdatePolicy, placement committedPlacement: PanelPlacementPreferences = .defaults) -> Bool {
+        let base = GeneralSettingsDraft(config: config, updatePolicy: committedPolicy, placement: committedPlacement)
         func values(_ rows: [Row]) -> [[String]] { rows.map { [$0.key, $0.value] } }
         return nodePath != base.nodePath || ompPath != base.ompPath || profile != base.profile
             || refreshSeconds != base.refreshSeconds || cacheMinutes != base.cacheMinutes
             || timeoutSeconds != base.timeoutSeconds || warnPercent != base.warnPercent
             || criticalPercent != base.criticalPercent || showPace != base.showPace
-            || providerMode != base.providerMode || updatePolicy != base.updatePolicy
+            || providerMode != base.providerMode || updatePolicy != base.updatePolicy || placement != base.placement
             || values(providerRows) != values(base.providerRows) || values(labelRows) != values(base.labelRows)
             || values(metricRows) != values(base.metricRows) || hasCompactChanges
     }
@@ -537,7 +541,25 @@ struct GeneralSettingsDraft: Equatable {
             }
         }
         guard issues.isEmpty, let config else { throw Failure(issues: issues) }
-        return SettingsCommit(config: config, updatePolicy: updatePolicy, compactChanges: changes)
+        return SettingsCommit(config: config, updatePolicy: updatePolicy, compactChanges: changes, placement: placement)
+    }
+
+    // MARK: Panel monitor (app-wide placement)
+
+    /// Stages the monitor choice: `nil` follows the System primary display, a UUID pins that physical monitor.
+    /// Selecting the UUID of the current primary display is deliberately distinct from `nil`.
+    mutating func selectMonitor(uuid: String?) { placement.displayUUID = uuid }
+
+    func monitorOptions(choices: [PanelDisplayChoice]) -> [PlacementMonitorOption] {
+        PlacementMonitorOption.options(selected: placement.displayUUID, choices: choices)
+    }
+
+    func monitorButtonTitle(choices: [PanelDisplayChoice]) -> String {
+        PlacementMonitorOption.buttonTitle(selected: placement.displayUUID, choices: choices)
+    }
+
+    func monitorHint(choices: [PanelDisplayChoice]) -> String {
+        PlacementMonitorOption.hint(selected: placement.displayUUID, choices: choices)
     }
 
     // MARK: Number text
@@ -584,5 +606,75 @@ struct GeneralSettingsDraft: Equatable {
         guard index == end else { return nil }
         // Canonical form so "5." and ".5" never depend on the platform's partial-decimal handling.
         return Double(mantissaSign + (whole.isEmpty ? "0" : whole) + "." + (fraction.isEmpty ? "0" : fraction) + exponent)
+    }
+}
+
+/// One row of the Settings "Monitor" list. Foundation-only so the selection rules are testable: a pinned monitor
+/// that is not connected stays visible and selected (disabled), and an explicit UUID never collapses into the
+/// "System primary" default even when both name the same physical display.
+struct PlacementMonitorOption: Equatable {
+    static let systemPrimaryID = "placement.system-primary"
+    static let systemPrimaryTitle = "System primary (Default)"
+
+    /// Stable dropdown row ID (`dropdown.row.<id>` in the accessibility tree).
+    let id: String
+    /// nil is the System primary default.
+    let displayUUID: String?
+    let title: String
+    let subtitle: String
+    let isAvailable: Bool
+    let isSelected: Bool
+
+    static func rowID(forUUID uuid: String) -> String { "placement.display.\(uuid)" }
+
+    static func options(selected: String?, choices: [PanelDisplayChoice]) -> [PlacementMonitorOption] {
+        let primaryName = choices.first(where: \.isPrimary).map { displayName($0.name) }
+        var result = [PlacementMonitorOption(
+            id: systemPrimaryID, displayUUID: nil, title: systemPrimaryTitle,
+            subtitle: primaryName.map { "Currently \($0). Stays put when focus moves." } ?? "The display macOS marks as primary. Stays put when focus moves.",
+            isAvailable: true, isSelected: selected == nil)]
+        var counts: [String: Int] = [:]
+        for choice in choices { counts[displayName(choice.name), default: 0] += 1 }
+        var seen = Set<String>()
+        for choice in choices where seen.insert(choice.uuid).inserted {
+            let name = displayName(choice.name)
+            var subtitle = choice.isPrimary ? "System primary display" : "Connected display"
+            if (counts[name] ?? 0) > 1 { subtitle += " \u{00B7} ID \(shortID(choice.uuid))" }
+            result.append(PlacementMonitorOption(id: rowID(forUUID: choice.uuid), displayUUID: choice.uuid, title: name,
+                                                 subtitle: subtitle, isAvailable: true, isSelected: selected == choice.uuid))
+        }
+        if let selected, !seen.contains(selected) {
+            result.append(PlacementMonitorOption(id: rowID(forUUID: selected), displayUUID: selected, title: "Disconnected monitor",
+                                                 subtitle: "Unavailable \u{00B7} ID \(shortID(selected)) \u{00B7} choice is kept",
+                                                 isAvailable: false, isSelected: true))
+        }
+        return result
+    }
+
+    static func buttonTitle(selected: String?, choices: [PanelDisplayChoice]) -> String {
+        guard let selected else { return systemPrimaryTitle }
+        guard let choice = choices.first(where: { $0.uuid == selected }) else { return "Disconnected monitor (unavailable)" }
+        let name = displayName(choice.name)
+        let duplicated = choices.filter { displayName($0.name) == name }.count > 1
+        return duplicated ? "\(name) \u{00B7} ID \(shortID(choice.uuid))" : name
+    }
+
+    static func hint(selected: String?, choices: [PanelDisplayChoice]) -> String {
+        guard let selected else {
+            return "The panel stays on the System primary display and does not follow the pointer or the active window. If the primary display changes, the panel moves with it."
+        }
+        if let choice = choices.first(where: { $0.uuid == selected }) {
+            return "The panel is always placed on \(displayName(choice.name)), even if it is not the primary display."
+        }
+        return "This monitor is not connected. Until it returns the panel temporarily uses the System primary display; your choice is kept and the panel moves back when the monitor reconnects."
+    }
+
+    private static func displayName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Display" : trimmed
+    }
+
+    private static func shortID(_ uuid: String) -> String {
+        String(uuid.filter { $0 != "-" }.suffix(6)).uppercased()
     }
 }

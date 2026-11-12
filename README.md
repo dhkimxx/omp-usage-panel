@@ -29,7 +29,7 @@ The app is installed to `~/Applications/OMP Usage.app` with its own copy of the 
 - Settings ID fields (**Providers**, **Labels**, **Metrics**) are ordinary editable text fields with the same custom suggestion list, opened from the chevron or **↓**. Any exact ID can still be typed; nothing is completed unasked. The list never interferes with native editing, IME composition, selection, undo or clipboard shortcuts; keys are only intercepted while the list is open for that field and not composing. **Escape** closes the list before Settings, and picking a suggestion updates the staged draft only.
 - OS file dialogs and the **Options**/right-click command menus remain native.
 - **Options** (or right-click): Settings…, refresh, open data folder, reset position, quit.
-- **Option-drag** to move the panel; **Reset position** restores automatic placement.
+- **Option-drag** to move the panel; **Reset position** restores automatic placement on the configured monitor (it does not change the monitor choice).
 - The summary is the highest single observed utilization, not an account total. Unknown values are not zero.
 
 **Quit** does not immediately restart the app. To reopen it, or to apply manual edits made to `config.json` outside the app:
@@ -50,9 +50,19 @@ Open **Settings → Display → Compact view** to choose which providers appear,
 - Without a notch (or when the panel is moved), rings form one contiguous capsule below the menu bar, left group then right group, with no camera gap.
 - Screen bounds may reduce the effective cap. App/status-menu occupancy is not detected; reduce the count or change sides if menus overlap.
 
+### Panel placement (monitor)
+
+Open **Settings → Display → Panel placement** and use the **Monitor** dropdown:
+
+- **System primary (Default)** keeps the panel on the display macOS marks as primary (the one with the menu bar in System Settings › Displays). It does not follow the pointer, the active window or keyboard focus, so it stays put while you work on other monitors. If you change the primary display in macOS, the panel follows that change.
+- A named monitor pins the panel to that physical display, even when it is not the primary one. Monitors are remembered by display UUID; choosing the primary display explicitly is different from the default, because it keeps that monitor if the primary changes. Monitors with the same name are shown with a short ID suffix.
+- If the pinned monitor is disconnected, it stays listed as **Disconnected monitor** (unavailable) and your choice is kept. The panel temporarily uses the System primary display and moves back when that monitor reconnects.
+- A position you set with **Option-drag** overrides the configured monitor and follows whichever physical display you drag the panel onto. **Reset position** clears only that override and returns the panel to the configured monitor; saving a different monitor in Settings also clears the override.
+- The choice is app-wide (not per omp profile), staged until **Save & Apply**; **Cancel** discards it. macOS display settings are never changed.
+
 ## Configuration
 
-Open **Options → Settings…** (the single Settings window; configure/**+** in the compact panel opens it directly at **Display**) to edit the configuration in a dark, custom-styled window with sections for **Collection**, **Display**, **Providers**, **Labels**, **Metrics**, **Runtime** and **Updates**. Edits are staged: **Save & Apply** validates everything, writes the file privately and atomically, saves any changed compact-view preferences, then restarts collection in place—no app restart needed. **Cancel** or closing the window discards all staged edits, including compact ones. If the config save fails, nothing else is applied and your draft stays open. Changing the profile clears the previous profile's displayed data; compact preferences are scoped per configuration path and omp profile, so each edited profile shows and saves its own. API keys and authentication are not edited here; they stay managed by omp.
+Open **Options → Settings…** (the single Settings window; configure/**+** in the compact panel opens it directly at **Display**) to edit the configuration in a dark, custom-styled window with sections for **Collection**, **Display**, **Providers**, **Labels**, **Metrics**, **Runtime** and **Updates**. Edits are staged: **Save & Apply** validates everything, writes the file privately and atomically, saves any changed compact-view preferences, then, only when the collector configuration changed, restarts collection in place—no app restart needed. Compact-view or monitor-only changes do not restart collection. **Cancel** or closing the window discards all staged edits, including compact ones. If the config save fails, nothing else is applied and your draft stays open. Changing the profile clears the previous profile's displayed data; compact preferences are scoped per configuration path and omp profile, so each edited profile shows and saves its own. API keys and authentication are not edited here; they stay managed by omp.
 
 The file is `~/Library/Application Support/omp-usage-panel/config.json`; editing it by hand still needs the restart above. Do not put API keys in it.
 
@@ -80,7 +90,7 @@ node packages/usage-core/cli.mjs --refresh  # runs `omp usage invalidate` first
 
 ## Updates
 
-After the one-time source install above, the app checks GitHub for new versions. Updates are prebuilt universal (arm64 + x86_64) apps downloaded from [GitHub Releases](https://github.com/dhkimxx/omp-usage-panel/releases); no Xcode or source build is needed for them. Node.js 22.18+ and omp are still required. No prebuilt update has been published in the signed feed yet (the feed is currently empty).
+After the one-time source install above, the app checks GitHub for new versions. Updates are prebuilt universal (arm64 + x86_64) apps downloaded from [GitHub Releases](https://github.com/dhkimxx/omp-usage-panel/releases); no Xcode or source build is needed for them. Node.js 22.18+ and omp are still required.
 
 - **Defaults:** daily checks on, notifications on, automatic installation **off**.
 - **Settings → Updates** (app-wide, not per omp profile) holds these controls and uses the same **Save & Apply** / **Cancel** as the rest of Settings. **Check for Updates…** in the menu runs a manual check, which ignores Skip and turned-off notifications.

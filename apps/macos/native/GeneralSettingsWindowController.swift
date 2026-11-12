@@ -73,6 +73,9 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
     /// (selection, Escape, outside click, editing end, window close...). The panel uses it to keep an update cutover
     /// from interrupting an open list.
     var dropdownTrackingChanged: ((Bool) -> Void)?
+    /// Read-only provider of the currently connected monitors, read when a draft starts or `edit` is called.
+    /// Never persists anything; hotplug later arrives through `updateDisplays(_:)`.
+    var displayChoicesRequested: (() -> [PanelDisplayChoice])?
     /// Optional read-only location of the configuration file shown on the Runtime section.
     var configLocation: String? { didSet { locationValue.stringValue = configLocation ?? "Not available" } }
 
@@ -84,6 +87,8 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
     private var draft: Draft?
     private var baseline: PanelConfig?
     private var baselinePolicy = UpdatePolicy.defaults
+    private var baselinePlacement = PanelPlacementPreferences.defaults
+    private var displayChoices: [PanelDisplayChoice] = []
     private var updateStatusValue: UpdateStatus?
     private var catalog = Draft.Catalog()
     private var isApplyingProgrammaticUpdate = false
@@ -103,6 +108,8 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
     private var bindings: [ObjectIdentifier: Binding] = [:]
 
     private let paceToggle = SettingsToggle(title: "Show elapsed-period pace markers")
+    private let monitorButton = SettingsDropdownButton()
+    private let monitorHintLabel = NSTextField(wrappingLabelWithString: "")
     private let modeControl = SettingsSegmentedControl(labels: ["Automatic", "Custom"])
     private let modeHint = NSTextField(wrappingLabelWithString: "")
     private let observedLabel = NSTextField(wrappingLabelWithString: "")
@@ -163,24 +170,27 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
 
     /// Starts a fresh draft from the committed config when the window is closed. While it is open the draft is
     /// kept as is (only observed suggestions refresh). Never presents or activates the window.
-    func edit(config: PanelConfig, updatePolicy: UpdatePolicy, result: PanelResult?) {
+    func edit(config: PanelConfig, updatePolicy: UpdatePolicy, placement: PanelPlacementPreferences, result: PanelResult?) {
         catalog = Draft.Catalog(result: result)
         if draft != nil, let window, window.isVisible || window.isMiniaturized {
             refreshSuggestions()
+            if let choices = displayChoicesRequested?() { updateDisplays(choices) }
             return
         }
         baseline = config
         baselinePolicy = updatePolicy
-        draft = Draft(config: config, updatePolicy: updatePolicy, compactSnapshot: compactSnapshotRequested?(config.profile))
+        baselinePlacement = placement
+        displayChoices = displayChoicesRequested?() ?? displayChoices
+        draft = Draft(config: config, updatePolicy: updatePolicy, placement: placement, compactSnapshot: compactSnapshotRequested?(config.profile))
         loadControlsFromDraft()
         refreshSuggestions()
     }
 
-    /// True while unsaved edits (collector configuration, compact preferences of any visited profile, or staged
-    /// update choices) exist.
+    /// True while unsaved edits (collector configuration, compact preferences of any visited profile, staged
+    /// update choices or the panel monitor) exist.
     var hasUnsavedChanges: Bool {
         guard let draft, let baseline else { return false }
-        return draft.hasChanges(from: baseline, updatePolicy: baselinePolicy)
+        return draft.hasChanges(from: baseline, updatePolicy: baselinePolicy, placement: baselinePlacement)
     }
 
     /// Visible or minimized: an unsolicited update prompt must stay quiet.
@@ -207,6 +217,13 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
 
     func selectUpdatesTab() { select(.updates) }
     func selectDisplayTab() { select(.display) }
+
+    /// Replaces only the connected-monitor list; the staged selection and dirty state are never touched, and a
+    /// selected monitor that is gone stays visible as unavailable.
+    func updateDisplays(_ choices: [PanelDisplayChoice]) {
+        displayChoices = choices
+        renderMonitor()
+    }
 
     /// Changes only the observed ID suggestions; never the draft, the committed config, focus or the save hook.
     func updateCatalog(result: PanelResult?) {
@@ -376,6 +393,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
     }
 
     private func select(_ section: SettingsSection) {
+        DropdownPopupController.shared.dismiss(for: monitorButton)
         for (candidate, page) in pages { page.isHidden = candidate != section }
         for (candidate, button) in navButtons { button.isCurrent = candidate == section }
     }
@@ -591,8 +609,29 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
                             help: "Usage at or above this percentage is shown as critical. Must be at least the warning value; values above 100 are allowed."),
                 group([paceToggle, hint("Pace markers show how much of each limit's period has elapsed, next to the usage.")]),
             ], spacing: 14),
+            panelPlacementSection(),
             compactSection(),
         ])
+    }
+
+    /// `Panel placement`: which physical monitor hosts the usage panel (app-wide, not per profile).
+    private func panelPlacementSection() -> NSView {
+        monitorButton.target = self
+        monitorButton.action = #selector(monitorPressed)
+        monitorButton.setAccessibilityIdentifier("placement.monitor")
+        monitorButton.setAccessibilityLabel("Monitor")
+        monitorButton.title = PlacementMonitorOption.systemPrimaryTitle
+        style(secondary: monitorHintLabel)
+        monitorHintLabel.setAccessibilityIdentifier("placement.monitor.hint")
+        let titleLabel = makeLabel("Monitor")
+        titleLabel.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        monitorButton.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        return card([
+            sectionTitle("Panel placement"),
+            horizontal([titleLabel, monitorButton, flexibleSpacer()], spacing: 6),
+            monitorHintLabel,
+            hint("Option-drag overrides placement. Reset position returns to the selected monitor."),
+        ], spacing: 10)
     }
 
     /// `Compact view`: one shared maximum for the whole notch row and a selection plus Left/Right choice per provider.
@@ -1188,6 +1227,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         }
         updateModeState()
         shownCompactScope = draft.compactScope
+        renderMonitor()
         renderCompact(forceMaximumText: true)
     }
 
@@ -1233,6 +1273,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
     }
 
     private func dismissSuggestionLists() {
+        DropdownPopupController.shared.dismiss(for: monitorButton)
         for field in suggestionFields { field.dismissSuggestions() }
     }
 
@@ -1362,6 +1403,42 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
     // MARK: Actions
 
     @objc private func paceChanged() { draft?.showPace = paceToggle.state == .on }
+
+    @objc private func monitorPressed() {
+        let controller = DropdownPopupController.shared
+        if controller.isPresented(for: monitorButton) {
+            controller.dismiss(for: monitorButton)
+            return
+        }
+        guard draft != nil, monitorButton.window != nil, !monitorButton.isHiddenOrHasHiddenAncestor else { return }
+        presentMonitorChoices()
+    }
+
+    private func presentMonitorChoices() {
+        guard let draft else { return }
+        let items = draft.monitorOptions(choices: displayChoices).map { option -> DropdownItem in
+            DropdownItem(id: option.id, title: option.title, subtitle: option.subtitle, isSelected: option.isSelected,
+                         isEnabled: option.isAvailable) { [weak self] in
+                self?.draft?.selectMonitor(uuid: option.displayUUID)
+                self?.renderMonitor()
+            }
+        }
+        DropdownPopupController.shared.show(anchor: monitorButton, items: items,
+                                            trackingChanged: { [weak self] held in
+                                                self?.monitorButton.needsDisplay = true
+                                                self?.dropdownTrackingChanged?(held)
+                                            })
+    }
+
+    /// Re-renders the Monitor control from the staged placement and the latest connected-monitor catalog.
+    private func renderMonitor() {
+        guard let draft else { return }
+        monitorButton.title = draft.monitorButtonTitle(choices: displayChoices)
+        monitorButton.setAccessibilityValue(monitorButton.title)
+        monitorButton.toolTip = monitorButton.title
+        monitorHintLabel.stringValue = draft.monitorHint(choices: displayChoices)
+        if DropdownPopupController.shared.isPresented(for: monitorButton) { presentMonitorChoices() }
+    }
 
     @objc private func modeChanged() {
         draft?.providerMode = modeControl.selectedSegment == 1 ? .custom : .automatic

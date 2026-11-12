@@ -347,4 +347,35 @@ private func runUnifiedCompactDraftTests() {
     bare.editCompact { $0.clearSelection() }
     bare.setText("3", for: .compactMaximum)
     precondition(bare.compact == nil && commit(bare)?.compactChanges.isEmpty == true && !bare.hasChanges(from: config, updatePolicy: .defaults))
+
+    // Panel monitor: placement-only edits are unsaved changes, revert clears them, other edits keep the choice.
+    let builtIn = PanelDisplayChoice(uuid: "37D8832A-2D66-02CA-B9F7-8F30A301B230", name: "Built-in Retina Display", isPrimary: true)
+    let dell = PanelDisplayChoice(uuid: "63FD4F17-3FBA-46CD-AD01-70F294053371", name: "DELL U2417H", isPrimary: false)
+    var placed = Draft(config: config)
+    precondition(!placed.hasChanges(from: config, updatePolicy: .defaults, placement: .defaults))
+    placed.selectMonitor(uuid: dell.uuid)
+    precondition(placed.hasChanges(from: config, updatePolicy: .defaults, placement: .defaults), "a monitor-only edit is unsaved")
+    precondition(commit(placed)?.placement.displayUUID == dell.uuid && commit(placed)?.config == config, "placement commits without touching config")
+    placed.showPace.toggle()
+    placed.showPace.toggle()
+    precondition(commit(placed)?.placement.displayUUID == dell.uuid, "an unrelated edit keeps the staged monitor")
+    placed.selectMonitor(uuid: nil)
+    precondition(!placed.hasChanges(from: config, updatePolicy: .defaults, placement: .defaults), "reverting to System primary is not a change")
+    precondition(placed.hasChanges(from: config, updatePolicy: .defaults, placement: PanelPlacementPreferences(displayUUID: dell.uuid)), "dropping a saved monitor is a change")
+    // An explicit UUID of the primary display stays distinct from the System primary default.
+    placed.selectMonitor(uuid: builtIn.uuid)
+    precondition(placed.hasChanges(from: config, updatePolicy: .defaults, placement: .defaults))
+
+    // Options: default first, connected names, selection marked; catalog refresh never changes the staged choice.
+    let connected = placed.monitorOptions(choices: [builtIn, dell])
+    precondition(connected.map(\.title) == ["System primary (Default)", "Built-in Retina Display", "DELL U2417H"])
+    precondition(connected.filter(\.isSelected).map(\.displayUUID) == [builtIn.uuid] && connected.allSatisfy(\.isAvailable))
+    let unplugged = placed.monitorOptions(choices: [dell])
+    precondition(unplugged.count == 3 && unplugged[2].displayUUID == builtIn.uuid && unplugged[2].isSelected && !unplugged[2].isAvailable, "a disconnected selection stays visible")
+    precondition(placed.placement.displayUUID == builtIn.uuid, "options never mutate the draft")
+    precondition(placed.monitorButtonTitle(choices: [dell]) == "Disconnected monitor (unavailable)" && placed.monitorHint(choices: [dell]).contains("reconnects"))
+    let twinA = PanelDisplayChoice(uuid: "AAAAAAAA-0000-0000-0000-000000111111", name: "DELL U2417H", isPrimary: false)
+    let twinB = PanelDisplayChoice(uuid: "BBBBBBBB-0000-0000-0000-000000222222", name: "DELL U2417H", isPrimary: false)
+    let twins = PlacementMonitorOption.options(selected: nil, choices: [twinA, twinB])
+    precondition(twins[1].subtitle != twins[2].subtitle && twins[0].isSelected, "same-name monitors are distinguishable")
 }

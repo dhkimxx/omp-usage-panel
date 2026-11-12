@@ -3,6 +3,7 @@ import Foundation
 @main struct ModelsTests {
     static func main() throws {
         runDockModelTests()
+        runPanelPlacementTests()
         runDashboardModelTests()
         runCompactPreferencesTests()
         try runPanelConfigStoreTests()

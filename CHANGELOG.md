@@ -1,11 +1,15 @@
 # Changelog
 
+## 0.2.1
+
+- Keep the usage panel on one stable monitor: the default **System primary** display no longer depends on which monitor has focus, so multi-monitor setups stop jumping between displays. **Settings → Display → Panel placement → Monitor** can instead pin a connected physical monitor (identified by its display UUID, not a transient ID). A pinned monitor that is unplugged is shown as unavailable, the panel temporarily uses the System primary display, and it returns when the monitor reconnects. Saving a different monitor resets a manual position; **Reset position** keeps the chosen monitor. The choice is app-wide, staged with **Save & Apply** / **Cancel**, and never changes macOS display settings. Older versions ignore the new preference and use their own placement.
+
 ## 0.2.0
 
 - Add GitHub updates through pinned Sparkle 2.10.1: daily checks and notifications on, automatic installation off by default, a native Update Now / Skip This Version / Later / Turn Off Notifications prompt, optional automatic-install consent, manual **Check for Updates…** and an app-wide **Updates** settings tab with Save & Apply / Cancel. Automatic restarts wait until the app is idle.
 - Authenticate the feed and archive with Ed25519 and a signed app-tree hash; restart the original LaunchAgent from an out-of-bundle watcher, require native startup acknowledgment and roll back on failed health, preserving config, auth and provider plugins.
 - Source install is now a one-time bootstrap; later updates are prebuilt universal (arm64 + x86_64) apps. Updates remain ad-hoc signed and not notarized.
-- Add maintainer `release:setup` (initial channel establishment only), `release:package` and `release:publish --notes-file <file> [--dry-run]` flow with the root `package.json` version as authority and the signing key held only in the local Keychain. No prebuilt update has been published in the signed feed yet.
+- Add maintainer `release:setup` (initial channel establishment only), `release:package` and `release:publish --notes-file <file> [--dry-run]` flow with the root `package.json` version as authority and the signing key held only in the local Keychain.
 
 - Replace **Open config** with a native **Settings…** window that edits every user-editable configuration field (collection, display, providers, labels, metrics, runtime) with **Save & Apply** and **Cancel**; authentication remains managed by omp.
 - Persist Settings saves by validating the complete configuration and atomically replacing the private config file, leaving the file and running configuration unchanged on failure.
