@@ -5,9 +5,39 @@
     <link>https://github.com/dhkimxx/omp-usage-panel</link>
     <description>Signed OMP Usage application updates</description>
     <language>en</language>
+    <item>
+      <title>OMP Usage 0.2.0</title>
+      <pubDate>Thu, 12 Nov 2026 03:28:53 +0000</pubDate>
+      <sparkle:version>0.2.0</sparkle:version>
+      <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <omp:appTreeSHA256>026d925b49f203e00b02dba24704b0186edc548a1443691eebab19a46fa30d39</omp:appTreeSHA256>
+      <omp:sourceCommit>582fb1efa700b0ed29c5c6d60c7a3462cfb61f42</omp:sourceCommit>
+      <description sparkle:descriptionFormat="plain-text"><![CDATA[## OMP Usage Panel 0.2.0
+
+### Highlights
+
+- **Updates through GitHub (Sparkle 2.10.1).** Checks run roughly daily and are pull-based (no push); notifications are quiet and deferrable. Update Now / Skip This Version / Later / Turn Off Notifications, manual **Check for Updates…**, and an **Updates** settings tab. Automatic installation is off by default; automatic restarts wait until the app is idle. Feed and archive are authenticated with Ed25519 and a signed app-tree hash; a failed health check rolls back to the previous app.
+- **Unified Settings window.** One dark sidebar window with **Save & Apply** / **Cancel**, covering every user-editable field; compact provider selection, maximum and Left/Right placement live in **Display → Compact view**.
+- **Per-provider wings.** Choose which providers appear, a shared total maximum with one aggregate **More** control, and Left/Right placement for each provider.
+- **Reparent fix.** A ring no longer goes missing when a provider moves directly from the right wing to the left; already orphaned rings are repaired without resetting preferences.
+- **Dense metric cards.** Content-sized cards with smaller primary values, thin progress and inline footer, preserving zero, unknown, remaining-only, over-limit and estimated values.
+- **Custom dropdowns.** Provider/account pickers and Settings Providers/Labels/Metrics ID suggestions use custom scrollable lists with keyboard navigation, Escape-closes-list-only and outside-click dismissal.
+
+### Upgrading
+
+- Existing saved settings and policies are preserved: configuration, authentication, selected providers, per-provider placements, profile buckets, and check/notification/automatic-install choices. Saved compact preferences stay readable if an automatic rollback restores the previous version: provider membership, maximum and a default side are persisted in the older-compatible form, and per-provider Left/Right overrides are retained as extra data. The older UI cannot render mixed per-provider wings and uses the default side instead. Full compatibility of 0.2.0 settings with older versions is not promised.
+- Earlier `0.1.0` installs made from source before updater support cannot discover updates. They need one manual install of this release (source installer, below). An updater-enabled installation can discover newer releases through the signed feed; this release does not claim any future check has already run.
+
+### Installation and trust
+
+- The universal (arm64 + x86_64) ZIP is ad-hoc signed and authenticated with Ed25519, but it is **not** Apple Developer ID signed or notarized. A manually downloaded copy may be blocked or warned about by Gatekeeper.
+- The recommended path is the documented source installer (`npm run macos:install`), which also bootstraps updates. Do not bypass quarantine.]]></description>
+      <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v0.2.0/OMP-Usage-0.2.0.zip" length="2538700" type="application/octet-stream" sparkle:edSignature="JKiuZVviFx98IgrtVZBc7wEriZ0Vl2mvRCmxLXEf9xXxQLNmrX1Ul92l2c972v9VMtJolTuNx5w+W2XrqN2JAQ==" />
+    </item>
   </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: 02RL/m4JW/RbpKDW1egirrO7Q/NQFoPGlIjLIbq6MQ/e6wKOjCYsMwtfb+WHztqqHAuxL61UCUUYwq5D1gCwBQ==
-length: 407
+edSignature: fRFgEsxmF7/pry/dSpoF9UrxVXiQKftyDhputpqbzSJA+s3p7Wr4BiNTXNCYlKjmPmV595lAkWaXwTushOE4Dg==
+length: 4085
 -->
