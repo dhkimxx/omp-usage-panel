@@ -118,7 +118,7 @@ resolve_release() {
 download_and_verify() {
   dmg="$TMP_DIR/OMP-Usage.dmg"
   say "Downloading OMP Usage $version..."
-  curl -fL --proto '=https' --tlsv1.2 -o "$dmg" "$download_url" || fail 'download failed.'
+  curl -fL --progress-bar --proto '=https' --tlsv1.2 -o "$dmg" "$download_url" || fail 'download failed.'
   size=$(wc -c <"$dmg" | tr -d ' ')
   [ "$size" = "$expected_size" ] || fail 'downloaded file size does not match GitHub; nothing was installed.'
   actual_sha=$(/usr/bin/shasum -a 256 "$dmg" | cut -d ' ' -f 1) || fail 'cannot compute the SHA-256 digest.'
