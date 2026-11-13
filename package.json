@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Node-only omp usage collector and native macOS usage panel",
+  "description": "Native macOS menu-bar panel that shows omp provider usage at a glance",
   "workspaces": ["packages/*", "apps/*"],
   "engines": { "node": ">=22.18.0" },
   "scripts": {
