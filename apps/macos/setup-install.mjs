@@ -9,9 +9,10 @@ import { UpdateError } from './update-transaction.mjs'
  * First-run setup helper shipped inside the app: `node setup-install.mjs <install|launch>`. One JSON object on stdin, one JSON line on
  * stdout. Exit 0: {"ok":true,"command":C,"action":A,"appPath","configPath","pid"?}. Exit 1: {"ok":false,"command":C,"error":{"code","message"}}.
  *
- * Request (strict: no other field is accepted): {"sourceAppPath","hostPid","nodePath"?,"ompPath"?,"profile"?}. `sourceAppPath` must be
+ * Request (strict: no other field is accepted): {"sourceAppPath","hostPid","ompPath"?,"profile"?}. `sourceAppPath` must be
  * the app bundle that contains this very helper (compared by physical path), so only the running app itself can ever be the payload.
- * `nodePath`, `ompPath` and `profile` are install-only and used only when no configuration exists yet; an existing valid configuration
+ * There is no Node field: the helper runs under the app's managed Node and a fresh configuration records that Node (`process.execPath`).
+ * `ompPath` and `profile` are install-only and used only when no configuration exists yet; an existing valid configuration
  * is authoritative, is never rewritten, and its paths and profile win over anything supplied.
  *
  *   install  Installs the prebuilt app that contains this helper (no Swift, Xcode or source checkout) into ~/Applications, creates the
@@ -32,11 +33,11 @@ export const helperPath = 'Contents/Resources/runtime/apps/macos/setup-install.m
 const maxInputBytes = 65536
 // Another OMP Usage process may hold the installer lock for a few seconds while it checks its update state.
 const lockWaitMs = 10_000
-const fields = { install: ['sourceAppPath', 'hostPid', 'nodePath', 'ompPath', 'profile'], launch: ['sourceAppPath', 'hostPid'] }
+const fields = { install: ['sourceAppPath', 'hostPid', 'ompPath', 'profile'], launch: ['sourceAppPath', 'hostPid'] }
 
 /** `bundle` is the app that contains the running helper; production always derives it from this module's location.
  * @typedef {import('./ownership.mjs').OwnershipOptions & {bundle?:string}} SetupOptions */
-/** @typedef {{sourceAppPath:string, hostPid:number, nodePath?:string, ompPath?:string, profile?:string}} SetupRequest */
+/** @typedef {{sourceAppPath:string, hostPid:number, ompPath?:string, profile?:string}} SetupRequest */
 
 /** @param {string} message */
 function invalid(message) { return new InstallError('invalid-request', message) }
@@ -49,7 +50,7 @@ function optionalString(request, key) {
   if (typeof value !== 'string' || value.includes('\0')) throw invalid(`${key} must be a string`)
   return value
 }
-/** @param {Record<string,unknown>} request @param {'nodePath'|'ompPath'} key @param {string} code */
+/** @param {Record<string,unknown>} request @param {string} key @param {string} code */
 function executablePath(request, key, code) {
   const file = optionalString(request, key)
   if (file !== undefined && (!path.isAbsolute(file) || path.resolve(file) !== file)) throw new InstallError(code, `${key} must be a normalized absolute path`)
@@ -63,8 +64,8 @@ function parseRequest(command, value) {
   if (sourceAppPath === undefined || !path.isAbsolute(sourceAppPath)) throw invalid('sourceAppPath must be an absolute path')
   const hostPid = value.hostPid
   if (typeof hostPid !== 'number' || !Number.isInteger(hostPid) || hostPid <= 1) throw invalid('hostPid must be a process id')
-  const nodePath = executablePath(value, 'nodePath', 'node-unavailable'), ompPath = executablePath(value, 'ompPath', 'omp-unavailable'), profile = optionalString(value, 'profile')
-  return { sourceAppPath, hostPid, ...(nodePath === undefined ? {} : { nodePath }), ...(ompPath === undefined ? {} : { ompPath }), ...(profile === undefined ? {} : { profile }) }
+  const ompPath = executablePath(value, 'ompPath', 'omp-unavailable'), profile = optionalString(value, 'profile')
+  return { sourceAppPath, hostPid, ...(ompPath === undefined ? {} : { ompPath }), ...(profile === undefined ? {} : { profile }) }
 }
 /** The app bundle this helper runs from, by physical path. Anything else (a source checkout, a copied script) has no app to install.
  * @param {string} [helper] */
@@ -93,7 +94,7 @@ export function execute(command, value, options = {}) {
     const { action, pid } = launchManaged({ ...ownership, lockWaitMs, launch: { app: source, hostPid: request.hostPid } })
     return { action, appPath, configPath, ...(pid === undefined ? {} : { pid }) }
   }
-  install({ ...ownership, lockWaitMs, prebuilt: { app: source }, node: request.nodePath ?? process.execPath, ...(request.ompPath === undefined ? {} : { omp: request.ompPath }), ...(request.profile === undefined ? {} : { profile: request.profile }) })
+  install({ ...ownership, lockWaitMs, prebuilt: { app: source }, node: process.execPath, ...(request.ompPath === undefined ? {} : { omp: request.ompPath }), ...(request.profile === undefined ? {} : { profile: request.profile }) })
   return { action: 'relaunch', appPath, configPath }
 }
 

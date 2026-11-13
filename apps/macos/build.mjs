@@ -2,12 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { ensureSparkleSdk, readChannel, rootVersion, sourceRoot } from './sparkle.mjs'
+import { ensureNodeRuntime, ensureSparkleSdk, hostNodeArch, nodeArches, readChannel, rootVersion, sourceRoot, writeNodeResources } from './sparkle.mjs'
 
 export { sourceRoot }
 export const runtimeFiles = [
   ...['cli.mjs', 'collector.mjs', 'normalize.mjs', 'summary.mjs', 'index.mjs', 'package.json'].map(f => `packages/usage-core/${f}`),
-  ...['collect.mjs', 'config.mjs', 'uninstall.mjs', 'installation.mjs', 'build.mjs', 'ownership.mjs', 'update-transaction.mjs', 'update-ownership.mjs', 'setup-install.mjs', 'sparkle.mjs', 'update-channel.json', 'package.json'].map(f => `apps/macos/${f}`),
+  ...['collect.mjs', 'config.mjs', 'uninstall.mjs', 'installation.mjs', 'build.mjs', 'ownership.mjs', 'update-transaction.mjs', 'update-ownership.mjs', 'setup-install.mjs', 'sparkle.mjs', 'update-channel.json', 'node-runtime.json', 'package.json'].map(f => `apps/macos/${f}`),
   'package.json',
 ]
 const deploymentTarget = '13.0'
@@ -39,8 +39,13 @@ function compile({ sources, output, targets, extraArgs = [] }) {
   }
 }
 
-/** @param {{outputDirectory?: string, universal?: boolean}} [options] */
-export function buildApp({ outputDirectory = path.join(sourceRoot, 'build'), universal = false } = {}) {
+/**
+ * Contents/Resources/node holds the verified Node archives (never executed in place; the app extracts them at runtime).
+ * Universal builds carry both architectures, other builds only the host's.
+ * `ensureNode` replaces the download/verify/repack step (tests).
+ * @param {{outputDirectory?: string, universal?: boolean, ensureNode?: typeof ensureNodeRuntime}} [options]
+ */
+export function buildApp({ outputDirectory = path.join(sourceRoot, 'build'), universal = false, ensureNode = ensureNodeRuntime } = {}) {
   const output = path.resolve(outputDirectory), app = path.join(output, 'OMP Usage.app')
   const nativeDirectory = path.join(sourceRoot, 'apps/macos/native')
   const sources = readdirSync(nativeDirectory).filter(f => f.endsWith('.swift')).sort().map(f => path.join(nativeDirectory, f))
@@ -60,6 +65,7 @@ export function buildApp({ outputDirectory = path.join(sourceRoot, 'build'), uni
       copyFileSync(path.join(sourceRoot, file), dest)
     }
     copyFileSync(path.join(sourceRoot, 'LICENSE'), path.join(contents, 'Resources/LICENSE'))
+    writeNodeResources(path.join(contents, 'Resources/node'), ensureNode({ arches: universal ? [...nodeArches] : [hostNodeArch()] }))
     copyFileSync(sdk.license, path.join(contents, 'Resources/Sparkle-LICENSE'))
     // ditto keeps Sparkle's relative framework symlinks and the vendor's code signatures intact.
     execFileSync('/usr/bin/ditto', [sdk.framework, path.join(contents, 'Frameworks/Sparkle.framework')], { stdio: 'inherit' })

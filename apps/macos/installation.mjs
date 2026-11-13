@@ -66,22 +66,21 @@ function readConfig(c) {
     return parseConfig(JSON.parse(readFileSync(c.config, 'utf8')))
   } catch (error) { throw new InstallError('config-invalid', `The configuration at ${c.config} is missing, unreadable or invalid and was left unchanged: ${describe(error)}`, error) }
 }
-/** `checkOmp:false` leaves the omp path of an existing configuration alone: that configuration is authoritative, setup needs only a
- * usable Node to start the app, and a missing omp is the collector's runtime problem, never a reason to rewrite or refuse the file.
+/** `checkOmp:false` leaves the omp path of an existing configuration alone: that configuration is authoritative and a missing omp is
+ * the collector's runtime problem, never a reason to rewrite or refuse the file. The Node path of an existing configuration is a
+ * legacy opaque value (every helper runs under the app's managed Node) and is never checked; only a fresh configuration's Node,
+ * which is the running managed Node, must be a usable absolute executable.
  * @param {InstallContext} c @param {string} node @param {string} omp @param {{inPlace:boolean, fromConfig:boolean, checkOmp:boolean}} where */
 function validatePaths(c, node, omp, where) {
   const origin = where.fromConfig ? ' (from the existing configuration)' : ''
   /** @type {[string,string,string][]} */
-  const runtimes = [['Node', 'node-unavailable', node]]
+  const runtimes = []
+  if (!where.fromConfig) runtimes.push(['Node', 'node-unavailable', node])
   if (where.checkOmp) runtimes.push(['omp', 'omp-unavailable', omp])
   for (const [name, code, file] of runtimes) {
     if (!path.isAbsolute(file) || !executableFile(file)) throw new InstallError(code, `${name} is not an absolute executable: ${file}${origin}`)
     if (within(canonical(file), canonical(c.source))) throw new InstallError(code, `${name} must be outside the ${c.sourceKind}`)
   }
-  let reported
-  try { reported = c.run(node, ['--version']).trim() } catch (error) { throw new InstallError('node-unavailable', `Node could not be run: ${node}${origin}`, error) }
-  const version = /^v(\d+)\.(\d+)\.(\d+)/.exec(reported)
-  if (!version || Number(version[1]) < 22 || (Number(version[1]) === 22 && Number(version[2]) < 18)) throw new InstallError('node-unavailable', `Node 22.18.0 or newer is required${origin}`)
   for (const file of [c.app, c.stateDir, c.agent, c.config]) {
     // An app adopted in place is, by definition, where the app is installed.
     if (file === c.app && where.inPlace) continue
@@ -253,6 +252,16 @@ export function launchManaged(options) {
     return { action: 'relaunch' }
   }, c.lockWaitMs)
 }
+/** The app-owned managed Node runtime (recreated on demand), or null when absent. It must be a real directory of this user: a link is
+ * never followed and nothing outside the state directory is ever touched.
+ * @param {import('./ownership.mjs').Context} c @returns {string|null} */
+function ownedRuntime(c) {
+  const runtime = path.join(c.stateDir, 'runtime')
+  if (!present(runtime)) return null
+  const stat = lstatSync(runtime)
+  if (!stat.isDirectory() || stat.uid !== c.owner) throw new InstallError('state-unsafe', `Refusing to remove a managed runtime that is not a directory owned by this user: ${runtime}`)
+  return runtime
+}
 /** @param {InstallOptions} [options] */
 export function uninstall(options = {}) {
   const c = context(options)
@@ -264,11 +273,13 @@ export function uninstall(options = {}) {
     checkOwned(c, state)
     const running = ownedJobRunning(c, state)
     const updater = path.join(c.stateDir, 'updater')
-    const actions = [`Remove owned LaunchAgent ${c.agent}`, `Remove owned app ${c.app}`, `Preserve config and legacy migration records in ${c.stateDir}`, ...(present(updater) ? [`Remove updater helper copies and pending update state in ${updater}`] : [])]
+    const runtime = ownedRuntime(c)
+    const actions = [`Remove owned LaunchAgent ${c.agent}`, `Remove owned app ${c.app}`, `Preserve config and legacy migration records in ${c.stateDir}`, ...(runtime ? [`Remove managed Node runtime ${runtime}`] : []), ...(present(updater) ? [`Remove updater helper copies and pending update state in ${updater}`] : [])]
     if (c.dry) return actions
     if (running) stopJob(c)
     if (present(c.agent)) rmSync(c.agent)
     if (present(c.app)) rmSync(c.app, { recursive: true })
+    if (runtime) rmSync(runtime, { recursive: true, force: true })
     removeUpdaterArea(c)
     return actions
   })

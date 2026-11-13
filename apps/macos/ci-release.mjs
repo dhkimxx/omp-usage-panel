@@ -127,10 +127,10 @@ export function trustedTrigger(env, version) {
  * app (layout, universal deep-signed app, version, tree hash) and writes it with candidate.json into `output`, which must not exist.
  * When the runner provides GITHUB_OUTPUT, the artifact name and the SHA-256 of both files are published as step outputs so later jobs can
  * require exactly these bytes.
- * @param {{output?: string | undefined, env?: NodeJS.ProcessEnv, withApp?: CandidateAppProvider}} [options]  `withApp` supplies the built app; tests replace the compiler-backed default.
+ * @param {{output?: string | undefined, env?: NodeJS.ProcessEnv, withApp?: CandidateAppProvider, nodePin?: import('./sparkle.mjs').NodePin}} [options]  `withApp` supplies the built app; tests replace the compiler-backed default. `nodePin` replaces the committed Node pin the bundled runtime is checked against (tests).
  * @returns {Promise<{output: string, manifest: Candidate, manifestSHA256: string}>}
  */
-export async function buildCandidate({ output = defaultOutput, env = process.env, withApp = withReleaseApp } = {}) {
+export async function buildCandidate({ output = defaultOutput, env = process.env, withApp = withReleaseApp, nodePin } = {}) {
   const version = rootVersion(), trigger = trustedTrigger(env, version)
   const target = path.resolve(output)
   if (existsSync(target)) throw new Error(`Candidate output already exists: ${target}`)
@@ -142,7 +142,7 @@ export async function buildCandidate({ output = defaultOutput, env = process.env
       if (sourceCommit !== trigger.sourceCommit) throw new Error(`The checked-out commit ${sourceCommit} is not the commit that triggered this run (${trigger.sourceCommit})`)
       const archive = path.join(stage, archiveName(version))
       createDmg({ app, output: archive })
-      const appTreeSHA256 = inspectArchive({ file: archive, version, appTreeHash, expectedAppTreeSHA256: appTreeHash(app), expectedFrom: 'the built app' })
+      const appTreeSHA256 = inspectArchive({ file: archive, version, appTreeHash, expectedAppTreeSHA256: appTreeHash(app), expectedFrom: 'the built app', requireBundledNode: true, nodePin })
       const bytes = readFileSync(archive)
       /** @type {Candidate} */
       const built = {
@@ -357,7 +357,7 @@ export function verifyCandidateRun({ runId, appTreeHash, gh = systemGh, temporar
     return {
       verified: true, run: run.id, attempt: run.attempt, event: run.event, ref: run.ref, sourceCommit: run.head, version: manifest.version,
       artifact, archiveName: manifest.archiveName, length, archiveSHA256, appTreeSHA256,
-      note: 'GitHub build provenance, DMG layout, universal app, version and tree hash verified; nothing was signed, written or published',
+      note: 'GitHub build provenance, DMG layout, universal app, version, tree hash and the bundled Node resources (structure and self-consistency only; not compared with the current pin) verified; nothing was signed, written or published',
     }
   })
 }

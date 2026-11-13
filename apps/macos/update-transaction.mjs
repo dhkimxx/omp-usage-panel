@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { copyFileSync, cpSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { parseConfig } from './config.mjs'
-import { agentProgramArguments, appTreeHash, atomic, canonical, context, digest, ensurePrivateDirectory, executable, inspectInstaller, installerLabel, loadManifest, loadedJob, preserveLegacyState, present, safeTreeHash, sameEntries, removeIdleInstallerJobs, sameProcess, scanTree, startJob, stopJob, syncDirectory, syncTree, withLock } from './ownership.mjs'
+import { agentProgramArguments, appTreeHash, atomic, canonical, context, digest, ensurePrivateDirectory, inspectInstaller, installerLabel, loadManifest, loadedJob, preserveLegacyState, present, safeTreeHash, sameEntries, removeIdleInstallerJobs, sameProcess, scanTree, startJob, stopJob, syncDirectory, syncTree, withLock } from './ownership.mjs'
 
 /** @typedef {import('./ownership.mjs').Context} Context */
 /** @typedef {import('./ownership.mjs').InstallState} InstallState */
@@ -308,7 +308,6 @@ function verifyManaged(c) {
   try { job = loadedJob(c, state) } catch (error) { throw new UpdateError('ownership-mismatch', describe(error)) }
   let config
   try { config = parseConfig(JSON.parse(readFileSync(c.config, 'utf8'))) } catch (error) { throw new UpdateError('not-managed', `The configuration cannot be read: ${describe(error)}`) }
-  if (!executable(config.nodePath)) throw new UpdateError('not-managed', `The configured Node executable is not runnable: ${config.nodePath}`)
   return { state, scan, job, config }
 }
 
@@ -454,7 +453,7 @@ export function prepareUpdate(options) {
       atomic(a.backupManifest, readFileSync(a.manifest))
       syncDirectory(a.transaction); syncDirectory(a.updater)
       /** @type {Receipt} */
-      const receipt = { schema: 1, id: randomUUID(), phase: 'prepared', createdAt: c.now(), fromVersion: options.currentVersion, toVersion: options.expectedVersion, oldHash: verified.state.appHash, expectedHash: options.expectedAppTreeSHA256, appPath: c.app, agentPath: c.agent, configPath: c.config, stateDir: c.stateDir, agentHash: verified.state.agentHash, node: verified.config.nodePath, jobLoaded: verified.job !== null, hostPid: options.ownerPid, hostStart, restart: false, revoked: false, watcherPid: null, watcherStart: null, armToken: null, workerPid: null, workerStart: null, acknowledged: false, deadline: null, error: null }
+      const receipt = { schema: 1, id: randomUUID(), phase: 'prepared', createdAt: c.now(), fromVersion: options.currentVersion, toVersion: options.expectedVersion, oldHash: verified.state.appHash, expectedHash: options.expectedAppTreeSHA256, appPath: c.app, agentPath: c.agent, configPath: c.config, stateDir: c.stateDir, agentHash: verified.state.agentHash, node: process.execPath, jobLoaded: verified.job !== null, hostPid: options.ownerPid, hostStart, restart: false, revoked: false, watcherPid: null, watcherStart: null, armToken: null, workerPid: null, workerStart: null, acknowledged: false, deadline: null, error: null }
       writeReceipt(c, receipt)
       return receipt.id
     } catch (error) { discardTransaction(c); throw error }

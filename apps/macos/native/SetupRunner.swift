@@ -1,38 +1,40 @@
 import Foundation
 import Darwin
 
-/// Runs the bundled `setup-install.mjs` (one JSON request on stdin, one JSON line on stdout) and bounded
-/// `node --version` probes, always off the main thread. Output is capped, stderr is drained and discarded (it is
-/// never shown), the working directory is `/` so a mounted DMG is never held busy, and nothing runs through a shell.
+/// Runs the bundled `setup-install.mjs` (one JSON request on stdin, one JSON line on stdout) with the bundled Node
+/// runtime, always off the main thread. Output is capped, stderr is drained and discarded (it is never shown), the
+/// working directory is `/` so a mounted DMG is never held busy, and nothing runs through a shell.
 final class SetupRunner {
     /// Install is never killed: this is only how long it runs before the UI is told it is taking longer than usual.
     static let installNoticeDelay: TimeInterval = 180
     static let launchTimeout: TimeInterval = 45
-    static let probeTimeout: TimeInterval = 5
     private static let outputLimit = 1 << 20
     private static let terminationGrace: TimeInterval = 5
-
-    private let lock = NSLock()
-    private var probes: Set<ObjectIdentifier> = []
-    private var running: [ObjectIdentifier: Process] = [:]
-    private var closed = false
 
     private struct Outcome { let status: Int32?; let stdout: Data; let timedOut: Bool }
 
     // MARK: Helper protocol
 
-    /// `completion` runs on the main queue exactly once. `install` is a mutating transaction: it is never signalled,
-    /// the call waits for the helper's real exit however long it takes, and `timeout` only schedules one
-    /// `onStillRunning` notice on the main queue. `launch` is bounded: after `timeout` it is terminated and fails.
-    func run(command: SetupCommand, nodePath: String, ompPath: String, helperPath: String, request: SetupRequest,
-             timeout: TimeInterval, onStillRunning: (() -> Void)? = nil, completion: @escaping (Result<SetupSuccess, SetupFailure>) -> Void) {
+    /// `completion` runs on the main queue exactly once. The managed Node is resolved from the RUNNING app's bundle
+    /// (extracting it first when needed, which can take seconds on first run), so a DMG-mounted first run works with
+    /// no Node installed. `install` is a mutating transaction: it is never signalled, the call waits for the helper's
+    /// real exit however long it takes, and `timeout` only schedules one `onStillRunning` notice on the main queue.
+    /// `launch` is bounded: after `timeout` it is terminated and fails.
+    func run(command: SetupCommand, ompPath: String, helperPath: String, request: SetupRequest,
+             timeout: TimeInterval, bundle: Bundle = .main, onStillRunning: (() -> Void)? = nil,
+             completion: @escaping (Result<SetupSuccess, SetupFailure>) -> Void) {
         func finish(_ result: Result<SetupSuccess, SetupFailure>) { DispatchQueue.main.async { completion(result) } }
         guard FileManager.default.isReadableFile(atPath: helperPath) else { finish(.failure(SetupFailure(code: "missing-helper"))); return }
         guard let input = try? request.encoded() else { finish(.failure(SetupFailure(code: "invalid-request"))); return }
-        let environment = ChildEnvironment.environment(base: ProcessInfo.processInfo.environment, nodePath: nodePath, ompPath: ompPath)
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            guard let outcome = execute(executable: nodePath, arguments: [helperPath, command.rawValue], input: input,
-                                        environment: environment, timeout: timeout, cancellable: false, killOnTimeout: command != .install,
+            let node: String
+            switch ManagedNode.ensure(bundle: bundle) {
+            case .success(let path): node = path
+            case .failure(let error): finish(.failure(SetupFailure(code: "node-unavailable", detail: error.userMessage))); return
+            }
+            let environment = ChildEnvironment.environment(base: ProcessInfo.processInfo.environment, nodePath: node, ompPath: ompPath)
+            guard let outcome = execute(executable: node, arguments: [helperPath, command.rawValue], input: input,
+                                        environment: environment, timeout: timeout, killOnTimeout: command != .install,
                                         onTimeout: { DispatchQueue.main.async { onStillRunning?() } }) else {
                 finish(.failure(SetupFailure(code: "node-unavailable"))); return
             }
@@ -42,37 +44,10 @@ final class SetupRunner {
         }
     }
 
-    /// Bounded `node --version`. `completion` runs on the main queue.
-    func probeNode(path: String, completion: @escaping (SetupNodeProbe) -> Void) {
-        DispatchQueue.global(qos: .utility).async { [self] in
-            let probe = probeNodeBlocking(path: path)
-            DispatchQueue.main.async { completion(probe) }
-        }
-    }
-
-    /// Blocking variant for callers already off the main thread (sequential discovery).
-    func probeNodeBlocking(path: String) -> SetupNodeProbe {
-        guard path.hasPrefix("/"), case .file(true) = SetupFileKind.inspect(path) else { return .notRunnable }
-        let environment = ChildEnvironment.environment(base: ProcessInfo.processInfo.environment, nodePath: path, ompPath: "")
-        guard let outcome = execute(executable: path, arguments: ["--version"], input: nil, environment: environment,
-                                    timeout: Self.probeTimeout, cancellable: true, killOnTimeout: true, onTimeout: {}), !outcome.timedOut else { return .notRunnable }
-        return SetupNodeProbe.classify(exitStatus: outcome.status, output: String(decoding: outcome.stdout, as: UTF8.self))
-    }
-
-    /// Cancels probes only. A running install is never interrupted: the window holds quit until it finishes.
-    func shutdown() {
-        lock.lock(); closed = true
-        let cancellable = probes.compactMap { running[$0] }
-        lock.unlock()
-        for task in cancellable where task.isRunning { kill(task.processIdentifier, SIGKILL) }
-    }
-
     // MARK: Execution
 
     private func execute(executable: String, arguments: [String], input: Data?, environment: [String: String],
-                         timeout: TimeInterval, cancellable: Bool, killOnTimeout: Bool, onTimeout: () -> Void) -> Outcome? {
-        lock.lock(); let isClosed = closed; lock.unlock()
-        if isClosed && cancellable { return Outcome(status: nil, stdout: Data(), timedOut: true) }
+                         timeout: TimeInterval, killOnTimeout: Bool, onTimeout: () -> Void) -> Outcome? {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: executable)
         task.arguments = arguments
@@ -83,9 +58,6 @@ final class SetupRunner {
         let exited = DispatchSemaphore(value: 0)
         task.terminationHandler = { _ in exited.signal() }
         do { try task.run() } catch { return nil }
-        let id = ObjectIdentifier(task)
-        lock.lock(); running[id] = task; if cancellable { probes.insert(id) }; lock.unlock()
-        defer { lock.lock(); running[id] = nil; probes.remove(id); lock.unlock() }
 
         let readers = DispatchGroup()
         let collected = NSLock()

@@ -142,15 +142,16 @@ func runGeneralSettingsDraftTests() {
     precondition(committed(thresholds) == nil && fields(thresholds) == [.warnPercent])
 
     // Runtime fields: raw values, absolute paths, nonblank profile; showPace pass-through.
-    var runtime = Draft(config: draftConfig())
-    runtime.setText("node", for: .nodePath)
+    var runtime = Draft(config: draftConfig(nodePath: "/legacy/path with space/node "))
+    runtime.setText("relative", for: .ompPath)
     runtime.setText("  ", for: .profile)
-    precondition(Set(fields(runtime)) == [.nodePath, .profile] && committed(runtime) == nil)
-    runtime.setText("/opt/with space/node ", for: .nodePath)
+    precondition(Set(fields(runtime)) == [.ompPath, .profile] && committed(runtime) == nil)
+    runtime.setText("/opt/with space/omp ", for: .ompPath)
     runtime.setText(" my profile", for: .profile)
     runtime.showPace = false
     let runtimeConfig = committed(runtime)
-    precondition(runtimeConfig?.nodePath == "/opt/with space/node " && runtimeConfig?.profile == " my profile" && runtimeConfig?.showPace == false, "paths/profile kept raw")
+    precondition(runtimeConfig?.ompPath == "/opt/with space/omp " && runtimeConfig?.profile == " my profile" && runtimeConfig?.showPace == false, "paths/profile kept raw")
+    precondition(runtimeConfig?.nodePath == "/legacy/path with space/node ", "the legacy Node path is carried through byte for byte")
 
     // Every problem is reported at once so the UI can mark them all; nothing is built on failure.
     var many = Draft(config: draftConfig())

@@ -36,51 +36,11 @@ enum SetupLaunch {
     }
 
     static func defaultConfigPath(home: String) -> String {
-        (home as NSString).appendingPathComponent("Library/Application Support/omp-usage-panel/config.json")
+        (ManagedNodeLogic.supportDirectory(home: home) as NSString).appendingPathComponent("config.json")
     }
 }
 
-// MARK: - Node probing and file inspection
-
-struct SetupNodeVersion: Equatable, Comparable {
-    static let minimum = SetupNodeVersion(major: 22, minor: 18, patch: 0)
-    let major: Int, minor: Int, patch: Int
-
-    /// Strict `vMAJOR.MINOR.PATCH` (the output of `node --version`, surrounding whitespace allowed). Prereleases and
-    /// anything else are rejected rather than guessed at.
-    static func parse(_ output: String) -> SetupNodeVersion? {
-        let text = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.hasPrefix("v") else { return nil }
-        let parts = text.dropFirst().split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 3 else { return nil }
-        var numbers: [Int] = []
-        for part in parts {
-            guard !part.isEmpty, part.count <= 9, part.allSatisfy({ $0.isASCII && $0.isNumber }), let value = Int(part) else { return nil }
-            numbers.append(value)
-        }
-        return SetupNodeVersion(major: numbers[0], minor: numbers[1], patch: numbers[2])
-    }
-
-    static func < (lhs: SetupNodeVersion, rhs: SetupNodeVersion) -> Bool {
-        (lhs.major, lhs.minor, lhs.patch) < (rhs.major, rhs.minor, rhs.patch)
-    }
-    var isCompatible: Bool { self >= Self.minimum }
-    var text: String { "v\(major).\(minor).\(patch)" }
-}
-
-enum SetupNodeProbe: Equatable {
-    case compatible(SetupNodeVersion)
-    case tooOld(SetupNodeVersion)
-    case notRunnable
-    case unrecognized
-
-    static func classify(exitStatus: Int32?, output: String) -> SetupNodeProbe {
-        guard let exitStatus, exitStatus == 0 else { return .notRunnable }
-        guard let version = SetupNodeVersion.parse(output) else { return .unrecognized }
-        return version.isCompatible ? .compatible(version) : .tooOld(version)
-    }
-    var isCompatible: Bool { if case .compatible = self { return true }; return false }
-}
+// MARK: - File inspection
 
 enum SetupFileKind: Equatable {
     case missing
@@ -127,7 +87,6 @@ struct SetupDiscoveryEnvironment {
     var home: String
     var path: String?
     var kind: (String) -> SetupFileKind = SetupFileKind.inspect
-    var children: (String) -> [String] = { (try? FileManager.default.contentsOfDirectory(atPath: $0)) ?? [] }
 }
 
 /// Deterministic candidate ordering. Order IS the preference: earlier candidates win ties. Only absolute paths that
@@ -135,18 +94,6 @@ struct SetupDiscoveryEnvironment {
 enum SetupDiscovery {
     static func pathDirectories(_ path: String?) -> [String] {
         (path ?? "").split(separator: ":", omittingEmptySubsequences: true).map(String.init).filter { $0.hasPrefix("/") }
-    }
-
-    /// PATH, Homebrew (arm64 then Intel), `~/.local/bin`, then every NVM version directory newest first.
-    static func nodeCandidates(_ env: SetupDiscoveryEnvironment) -> [String] {
-        var ordered = pathDirectories(env.path).map { ($0 as NSString).appendingPathComponent("node") }
-        ordered += ["/opt/homebrew/bin/node", "/usr/local/bin/node", (env.home as NSString).appendingPathComponent(".local/bin/node")]
-        let nvm = (env.home as NSString).appendingPathComponent(".nvm/versions/node")
-        let versions = env.children(nvm).compactMap { name -> (SetupNodeVersion, String)? in
-            SetupNodeVersion.parse(name).map { ($0, name) }
-        }.sorted { $0.0 != $1.0 ? $0.0 > $1.0 : $0.1 < $1.1 }
-        ordered += versions.map { ((nvm as NSString).appendingPathComponent($0.1) as NSString).appendingPathComponent("bin/node") }
-        return usable(ordered, env)
     }
 
     /// PATH, `~/.local/bin`, `~/.bun/bin`, then Homebrew.
@@ -164,12 +111,6 @@ enum SetupDiscovery {
             if case .file(true) = env.kind(candidate) { return true }
             return false
         }
-    }
-
-    /// First compatible probe in candidate order; nil when none is compatible (the form then keeps the first
-    /// candidate, if any, so its failure is visible instead of leaving a blank field).
-    static func preferredNode(_ probes: [(path: String, probe: SetupNodeProbe)]) -> String? {
-        probes.first { $0.probe.isCompatible }?.path
     }
 }
 
@@ -200,7 +141,6 @@ enum SetupExistingConfig: Equatable {
 struct SetupRequest: Encodable, Equatable {
     let sourceAppPath: String
     let hostPid: Int
-    let nodePath: String?
     let ompPath: String?
     let profile: String?
 
@@ -225,6 +165,8 @@ struct SetupSuccess: Equatable {
 
 struct SetupFailure: Error, Equatable {
     let code: String
+    /// Controlled text for failures that originate in this app (never helper or process output).
+    var detail: String? = nil
     /// Controlled, fixed UI text chosen by `code`. Helper-supplied messages are never displayed.
     var userMessage: String {
         switch code {
@@ -237,7 +179,7 @@ struct SetupFailure: Error, Equatable {
         case "busy":
             return "Another OMP Usage install or update is busy. Wait a moment, then try again."
         case "node-unavailable":
-            return "Node.js could not be used. Choose a working Node.js 22.18 or newer executable, then try again."
+            return detail ?? "The bundled Node.js runtime could not be prepared or started. Download OMP Usage again and reinstall it, then try again."
         case "omp-unavailable":
             return "The omp executable could not be used. Choose a valid omp executable, then try again."
         case "invalid-profile":
@@ -310,30 +252,25 @@ struct SetupDraft: Equatable {
     static let defaultProfile = "default"
 
     let existing: SetupExistingConfig
-    private(set) var nodePath: String
     private(set) var ompPath: String
     private(set) var profile: String
-    private let initialNodePath: String
     private let initialOmpPath: String
-    /// Probe results are bound to the path they were measured for; editing the path invalidates them.
-    private(set) var nodeProbe: (path: String, probe: SetupNodeProbe)?
     private(set) var ompKind: (path: String, kind: SetupFileKind)?
 
     static func == (lhs: SetupDraft, rhs: SetupDraft) -> Bool {
-        lhs.existing == rhs.existing && lhs.nodePath == rhs.nodePath && lhs.ompPath == rhs.ompPath && lhs.profile == rhs.profile
-            && lhs.nodeProbe?.path == rhs.nodeProbe?.path && lhs.nodeProbe?.probe == rhs.nodeProbe?.probe
+        lhs.existing == rhs.existing && lhs.ompPath == rhs.ompPath && lhs.profile == rhs.profile
             && lhs.ompKind?.path == rhs.ompKind?.path && lhs.ompKind?.kind == rhs.ompKind?.kind
     }
 
-    /// `suggestedNode`/`suggestedOmp` are only used when there is no existing configuration.
-    init(existing: SetupExistingConfig, suggestedNode: String = "", suggestedOmp: String = "") {
+    /// `suggestedOmp` is only used when there is no existing configuration.
+    init(existing: SetupExistingConfig, suggestedOmp: String = "") {
         self.existing = existing
         if case .valid(let config) = existing {
-            nodePath = config.nodePath; ompPath = config.ompPath; profile = config.profile
+            ompPath = config.ompPath; profile = config.profile
         } else {
-            nodePath = suggestedNode; ompPath = suggestedOmp; profile = Self.defaultProfile
+            ompPath = suggestedOmp; profile = Self.defaultProfile
         }
-        initialNodePath = nodePath; initialOmpPath = ompPath
+        initialOmpPath = ompPath
     }
 
     var isReadOnly: Bool { if case .valid = existing { return true }; return false }
@@ -341,41 +278,27 @@ struct SetupDraft: Equatable {
     var refusalMessage: String? { if case .refused(let message) = existing { return message }; return nil }
 
     /// Edits are ignored while read-only, so a valid configuration can never be changed through this draft.
-    mutating func setNodePath(_ value: String) { guard !isReadOnly, value != nodePath else { return }; nodePath = value; nodeProbe = nil }
     mutating func setOmpPath(_ value: String) { guard !isReadOnly, value != ompPath else { return }; ompPath = value; ompKind = nil }
     mutating func setProfile(_ value: String) { guard !isReadOnly else { return }; profile = value }
-    mutating func record(nodeProbe probe: SetupNodeProbe, for path: String) { if path == nodePath { nodeProbe = (path, probe) } }
     mutating func record(ompKind kind: SetupFileKind, for path: String) { if path == ompPath { ompKind = (path, kind) } }
 
     /// True once the user changed anything from what was first shown. Always false while read-only.
     var isDirty: Bool {
-        !isReadOnly && (nodePath != initialNodePath || ompPath != initialOmpPath || profile != Self.defaultProfile)
+        !isReadOnly && (ompPath != initialOmpPath || profile != Self.defaultProfile)
     }
 
     // Field problems, evaluated against injected file kinds so tests need no filesystem.
-    func nodeIssue(kind: (String) -> SetupFileKind = SetupFileKind.inspect) -> SetupPathIssue? { SetupPathIssue.check(nodePath, kind: kind) }
     func ompIssue(kind: (String) -> SetupFileKind = SetupFileKind.inspect) -> SetupPathIssue? { SetupPathIssue.check(ompPath, kind: kind) }
     var profileIsBlank: Bool { PanelConfig.isBlank(profile) }
 
-    /// Probe state of the current Node path: nil while unmeasured.
-    var currentNodeProbe: SetupNodeProbe? { nodeProbe.flatMap { $0.path == nodePath ? $0.probe : nil } }
-
     enum Blocker: Equatable {
-        case refusedConfig, node(SetupPathIssue), nodeProbing, nodeNotRunnable, nodeTooOld(SetupNodeVersion), nodeUnrecognized
+        case refusedConfig
         case omp(SetupPathIssue), profile
     }
 
     /// The first reason Install & Open is unavailable, in display order; nil when ready.
     func blocker(kind: (String) -> SetupFileKind = SetupFileKind.inspect) -> Blocker? {
         if isRefused { return .refusedConfig }
-        if let issue = nodeIssue(kind: kind) { return .node(issue) }
-        switch currentNodeProbe {
-        case nil: return .nodeProbing
-        case .notRunnable?: return .nodeNotRunnable
-        case .unrecognized?: return .nodeUnrecognized
-        case .tooOld(let version)?: return .nodeTooOld(version)
-        case .compatible?: break
-        }
         // A valid existing configuration is authoritative: its omp path and profile are not re-validated here.
         if isReadOnly { return nil }
         if let issue = ompIssue(kind: kind) { return .omp(issue) }
@@ -385,25 +308,17 @@ struct SetupDraft: Equatable {
 
     func canInstall(kind: (String) -> SetupFileKind = SetupFileKind.inspect) -> Bool { blocker(kind: kind) == nil }
 
-    /// Read-only: only the source path and host PID (the existing config is authoritative). Otherwise the three
+    /// Read-only: only the source path and host PID (the existing config is authoritative). Otherwise the two
     /// confirmed values. nil while blocked.
     func request(sourceAppPath: String, hostPid: Int, kind: (String) -> SetupFileKind = SetupFileKind.inspect) -> SetupRequest? {
         guard canInstall(kind: kind) else { return nil }
-        if isReadOnly { return SetupRequest(sourceAppPath: sourceAppPath, hostPid: hostPid, nodePath: nil, ompPath: nil, profile: nil) }
-        return SetupRequest(sourceAppPath: sourceAppPath, hostPid: hostPid, nodePath: nodePath, ompPath: ompPath, profile: profile)
+        if isReadOnly { return SetupRequest(sourceAppPath: sourceAppPath, hostPid: hostPid, ompPath: nil, profile: nil) }
+        return SetupRequest(sourceAppPath: sourceAppPath, hostPid: hostPid, ompPath: ompPath, profile: profile)
     }
-
-    /// Node that runs the helper: the existing configuration's, or the confirmed selection.
-    var helperNodePath: String { nodePath }
 
     func blockerMessage(_ blocker: Blocker) -> String {
         switch blocker {
         case .refusedConfig: return refusalMessage ?? "The existing configuration cannot be used."
-        case .node(let issue): return "Node.js: " + issue.message(subject: "node")
-        case .nodeProbing: return "Checking Node.js\u{2026}"
-        case .nodeNotRunnable: return "Node.js could not be run from this path."
-        case .nodeUnrecognized: return "This file did not report a Node.js version."
-        case .nodeTooOld(let version): return "Node.js \(version.text) is too old. Version 22.18 or newer is required."
         case .omp(let issue): return "omp: " + issue.message(subject: "omp")
         case .profile: return "Enter a profile name."
         }
@@ -434,8 +349,8 @@ struct SetupQuitGate: Equatable {
 enum ChildEnvironment {
     static let fallbackPath = "/usr/bin:/bin:/usr/sbin:/sbin"
 
-    /// Selected Node and omp directories first (so `#!/usr/bin/env node` wrappers resolve the configured Node under
-    /// Finder's minimal environment), then the inherited PATH entries. Empty entries dropped, duplicates keep their
+    /// Selected Node and omp directories first (so `#!/usr/bin/env node` wrappers resolve a Node under Finder's
+    /// minimal environment), then the inherited PATH entries. Empty entries dropped, duplicates keep their
     /// first position. No shell is involved and no shell startup file is read.
     static func path(nodePath: String, ompPath: String, basePath: String?) -> String {
         var entries: [String] = []
@@ -453,5 +368,20 @@ enum ChildEnvironment {
         var environment = base
         environment["PATH"] = path(nodePath: nodePath, ompPath: ompPath, basePath: base["PATH"])
         return environment
+    }
+
+    /// The Node whose directory goes on PATH for `#!/usr/bin/env node` wrappers: the configuration's (legacy, possibly
+    /// a user Node) while its directory still exists, otherwise the managed runtime's, so a config that recorded a
+    /// since-pruned managed directory never leaves wrappers without a node. The spawned executable is always managed.
+    static func pathNode(configured: String, managed: String, directoryExists: (String) -> Bool) -> String {
+        guard configured.hasPrefix("/") else { return managed }
+        let directory = (configured as NSString).deletingLastPathComponent
+        return !directory.isEmpty && directoryExists(directory) ? configured : managed
+    }
+
+    /// Existing directory (symlinks followed), as opposed to a file or nothing.
+    static func directoryExists(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 }

@@ -276,9 +276,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
         let committed = configStore.config
         if committed != config {
-            let nodeChanged = committed.nodePath != config.nodePath
             applyConfiguration(committed)
-            if nodeChanged { updater.updateRuntime(config: committed, configPath: configStore.configPath) }
         } else if staged.contains(where: { $0.key == currentKey }) {
             // Compact-only: keep the collector, result and detail state; only plans and views are refreshed.
             compactRevision += 1

@@ -9,7 +9,7 @@ import { appTreeHash } from './ownership.mjs'
 import { archiveName } from './release.mjs'
 import { artifactName, attestsRun, buildCandidate, candidateManifestName, parseCandidate, renderCandidate, trustedRun, trustedTrigger, verifyCandidateRun, withVerifiedCandidate, workflowPath } from './ci-release.mjs'
 import { defaults, rootVersion } from './sparkle.mjs'
-import { buildFixtureApp, inTemp, recordingHdiutil } from './release-fixtures.mjs'
+import { buildFixtureApp, fixtureNodePin, inTemp, recordingHdiutil } from './release-fixtures.mjs'
 
 // Boundaries exercised for real: the DMG (hdiutil, universal ad-hoc-signed fixture app) and the candidate files. GitHub itself cannot run in a
 // test, so `createGitHub` stands in for the `gh` executable: it serves the REST shapes the code reads and enforces the `gh attestation verify`
@@ -384,7 +384,7 @@ const trustedEnv = {
 
 test('a built candidate holds exactly the DMG and its manifest, publishes the step outputs and verifies through the consumer path', darwin, async () => inTemp(async directory => {
   const app = buildFixtureApp(directory, { version }), output = path.join(directory, 'ci-release'), outputs = path.join(directory, 'github-output')
-  const built = await buildCandidate({ output, env: { ...trustedEnv, GITHUB_OUTPUT: outputs }, withApp: async (_options, body) => body({ app, appTreeHash, sourceCommit: head }) })
+  const built = await buildCandidate({ output, env: { ...trustedEnv, GITHUB_OUTPUT: outputs }, withApp: async (_options, body) => body({ app, appTreeHash, sourceCommit: head }), nodePin: fixtureNodePin })
   assert.deepEqual(readdirSync(output).sort(), [archiveName(version), candidateManifestName].sort(), 'no build tree or scratch files are left in the artifact')
   const dmg = readFileSync(path.join(output, archiveName(version))), manifestBytes = readFileSync(path.join(output, candidateManifestName))
   const manifest = parseCandidate(manifestBytes.toString('utf8'))
@@ -408,14 +408,14 @@ test('a built candidate holds exactly the DMG and its manifest, publishes the st
   assert.equal(verified.archiveSHA256, sha256(dmg)); assert.equal(verified.appTreeSHA256, appTreeHash(app))
 }))
 
-test('a candidate is not built for an untrusted trigger, another commit, a dirty checkout, a wrong app version or an existing output, and leaves nothing behind', darwin, async () => inTemp(async directory => {
+test('a candidate is not built for an untrusted trigger, another commit, a dirty checkout, a wrong app version, an app without the bundled Node runtime or an existing output, and leaves nothing behind', darwin, async () => inTemp(async directory => {
   const app = buildFixtureApp(directory, { version })
   /** @param {string | undefined} commit @returns {import('./ci-release.mjs').CandidateAppProvider} */
   const provide = commit => async (_options, body) => body({ app, appTreeHash, sourceCommit: commit })
   /** @param {string} label @param {Parameters<typeof buildCandidate>[0]} options */
   const refuses = async (label, options) => {
     const output = path.join(directory, `out-${label.replace(/\W+/g, '-')}`)
-    await assert.rejects(buildCandidate({ ...options, output }), label)
+    await assert.rejects(buildCandidate({ ...options, output, nodePin: fixtureNodePin }), label)
     assert.equal(existsSync(output), false, `${label}: no candidate directory`)
     assert.deepEqual(readdirSync(directory).filter(name => name.startsWith('.omp-ci-')), [], `${label}: no staging directory`)
   }
@@ -425,7 +425,10 @@ test('a candidate is not built for an untrusted trigger, another commit, a dirty
   await refuses('other commit', { env: trustedEnv, withApp: provide('d'.repeat(40)) })
   await refuses('dirty tree', { env: trustedEnv, withApp: provide(undefined) })
   await refuses('wrong app version', { env: trustedEnv, withApp: async (_options, body) => body({ app: buildFixtureApp(directory, { version: '0.0.1' }), appTreeHash, sourceCommit: head }) })
+  await assert.rejects(buildCandidate({ env: trustedEnv, output: path.join(directory, 'out-no-node'), nodePin: fixtureNodePin, withApp: async (_options, body) => body({ app: buildFixtureApp(directory, { version: '0.0.2', bundledNode: false }), appTreeHash, sourceCommit: head }) }), /no bundled Node runtime/)
+  assert.equal(existsSync(path.join(directory, 'out-no-node')), false, 'no candidate without the bundled Node runtime')
+  assert.deepEqual(readdirSync(directory).filter(name => name.startsWith('.omp-ci-')), [], 'no staging directory')
   const existing = path.join(directory, 'existing'); mkdirSync(existing); writeFileSync(path.join(existing, 'keep'), 'x')
-  await assert.rejects(buildCandidate({ output: existing, env: trustedEnv, withApp: provide(head) }))
+  await assert.rejects(buildCandidate({ output: existing, env: trustedEnv, withApp: provide(head), nodePin: fixtureNodePin }))
   assert.equal(readFileSync(path.join(existing, 'keep'), 'utf8'), 'x', 'an existing output is never touched')
 }))

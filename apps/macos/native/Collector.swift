@@ -3,31 +3,52 @@ import Darwin
 
 final class Collector {
     private var process: Process?
+    private var resolvingNode = false
     private var ownedGroup: pid_t?
     private var pendingForce = false
     private var stopped = false
     private let configPath: String
     private let config: PanelConfig
-    // Finder launches with a minimal PATH, so `#!/usr/bin/env node` omp wrappers need the configured Node and omp
-    // directories first. The config is immutable for this collector's lifetime (changes replace it); no shell is used.
-    private let childEnvironment: [String: String]
+    // Finder launches with a minimal PATH, so `#!/usr/bin/env node` omp wrappers need a Node directory and the omp
+    // directory first. The collector itself always runs the bundled Node; `config.nodePath` (legacy) only contributes
+    // its directory to the PATH while that directory still exists, else the managed Node's directory is used.
+    // The config is immutable for this collector's lifetime (changes replace it); no shell is used.
     var completion: ((Result<PanelResult, Error>) -> Void)?
 
     init(configPath: String, config: PanelConfig) {
         self.configPath = configPath; self.config = config
-        childEnvironment = ChildEnvironment.environment(base: ProcessInfo.processInfo.environment, nodePath: config.nodePath, ompPath: config.ompPath)
     }
     func collect(force: Bool = false) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !stopped else { return }
-        if process != nil { pendingForce = pendingForce || force; return }
+        if process != nil || resolvingNode { pendingForce = pendingForce || force; return }
+        resolvingNode = true
+        // The first run extracts the bundled Node (seconds), so resolution never happens on the main thread.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let node = ManagedNode.ensure(bundle: .main)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.resolvingNode = false
+                guard !self.stopped else { return }
+                let wantsForce = self.pendingForce || force
+                self.pendingForce = false
+                switch node {
+                case .success(let path): self.launch(node: path, force: wantsForce)
+                case .failure(let error): self.completion?(.failure(CollectorError(message: error.userMessage)))
+                }
+            }
+        }
+    }
+    private func launch(node: String, force: Bool) {
         guard let runtime = Bundle.main.resourceURL?.appendingPathComponent("runtime/apps/macos/collect.mjs").path else {
             completion?(.failure(CollectorError(message: "Bundled collector is missing"))); return
         }
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: config.nodePath)
+        task.executableURL = URL(fileURLWithPath: node)
         task.arguments = [runtime, "--config", configPath] + (force ? ["--refresh"] : [])
-        task.environment = childEnvironment
+        // The PATH is built per launch because the managed Node's directory is only known once it is resolved.
+        let pathNode = ChildEnvironment.pathNode(configured: config.nodePath, managed: node, directoryExists: ChildEnvironment.directoryExists)
+        task.environment = ChildEnvironment.environment(base: ProcessInfo.processInfo.environment, nodePath: pathNode, ompPath: config.ompPath)
         let stdout = Pipe(), stderr = Pipe()
         task.standardOutput = stdout; task.standardError = stderr
         process = task

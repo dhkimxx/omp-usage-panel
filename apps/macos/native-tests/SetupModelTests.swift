@@ -1,7 +1,7 @@
 import Foundation
 
-private func fakeEnvironment(home: String = "/Users/me", path: String?, files: [String: SetupFileKind], children: [String: [String]] = [:]) -> SetupDiscoveryEnvironment {
-    SetupDiscoveryEnvironment(home: home, path: path, kind: { files[$0] ?? .missing }, children: { children[$0] ?? [] })
+private func fakeEnvironment(home: String = "/Users/me", path: String?, files: [String: SetupFileKind]) -> SetupDiscoveryEnvironment {
+    SetupDiscoveryEnvironment(home: home, path: path, kind: { files[$0] ?? .missing })
 }
 
 private let validConfigJSON = """
@@ -22,18 +22,6 @@ func runSetupModelTests() {
     precondition(SetupLaunch.route(arguments: ["x", "--other", "y"], bundlePath: canonical, home: "/Users/me", resolve: resolve) == .usage)
     precondition(SetupLaunch.defaultConfigPath(home: "/Users/me") == "/Users/me/Library/Application Support/omp-usage-panel/config.json")
 
-    // Node version boundary: 22.18.0 is the first compatible release; anything not exactly vX.Y.Z is rejected.
-    precondition(SetupNodeVersion.parse("v22.17.9\n")?.isCompatible == false)
-    precondition(SetupNodeVersion.parse("v22.18.0\n")?.isCompatible == true)
-    precondition(SetupNodeVersion.parse("v22.23.4")?.isCompatible == true)
-    precondition(SetupNodeVersion.parse("v23.0.0")?.isCompatible == true)
-    precondition(SetupNodeVersion.parse("v21.99.99")?.isCompatible == false)
-    for bad in ["22.18.0", "v22.18", "v22.18.0-rc.1", "v22..0", "", "node v22.18.0", "v22.18.0.1", "v-1.0.0", "v22.18.x"] { precondition(SetupNodeVersion.parse(bad) == nil, bad) }
-    precondition(SetupNodeProbe.classify(exitStatus: 0, output: "v22.23.4\n") == .compatible(SetupNodeVersion(major: 22, minor: 23, patch: 4)))
-    precondition(SetupNodeProbe.classify(exitStatus: 0, output: "v20.1.0") == .tooOld(SetupNodeVersion(major: 20, minor: 1, patch: 0)))
-    precondition(SetupNodeProbe.classify(exitStatus: 1, output: "v22.23.4") == .notRunnable)
-    precondition(SetupNodeProbe.classify(exitStatus: nil, output: "") == .notRunnable)
-    precondition(SetupNodeProbe.classify(exitStatus: 0, output: "hello") == .unrecognized)
 
     // Path checks: files only, executable, absolute; folders and plain files are refused with distinct reasons.
     let kinds: [String: SetupFileKind] = ["/bin/node": .file(executable: true), "/etc/plain": .file(executable: false), "/opt": .directory]
@@ -43,27 +31,13 @@ func runSetupModelTests() {
     precondition(SetupPathIssue.check("/nope", kind: kind) == .missing && SetupPathIssue.check("/opt", kind: kind) == .directory)
     precondition(SetupPathIssue.check("/etc/plain", kind: kind) == .notExecutable && SetupPathIssue.check("/bin/node", kind: kind) == nil)
 
-    // Discovery ordering: PATH first, then brew, ~/.local/bin, then NVM newest-first; dups, folders, non-executables
-    // and relative PATH entries never appear. NVM names that are not versions are ignored; ordering is numeric.
-    let nvm = "/Users/me/.nvm/versions/node"
+    // omp discovery ordering: PATH first, then ~/.local/bin, ~/.bun/bin, Homebrew; dups, folders, non-executables
+    // and relative PATH entries never appear.
     let exec = SetupFileKind.file(executable: true)
-    var files: [String: SetupFileKind] = [
-        "/custom/bin/node": exec, "/opt/homebrew/bin/node": exec, "/usr/local/bin/node": .file(executable: false),
-        "/Users/me/.local/bin/node": exec, "\(nvm)/v22.9.0/bin/node": exec, "\(nvm)/v22.23.4/bin/node": exec,
-        "\(nvm)/v20.11.0/bin/node": exec, "\(nvm)/v22.18.0/bin/node": .directory, "rel/node": exec,
-    ]
-    let nodeEnv = fakeEnvironment(path: "/custom/bin:/opt/homebrew/bin:rel:/custom/bin::/missing", files: files,
-                                  children: [nvm: ["v22.9.0", "v20.11.0", "default", "v22.23.4", "v22.18.0", "alias"]])
-    precondition(SetupDiscovery.nodeCandidates(nodeEnv) == ["/custom/bin/node", "/opt/homebrew/bin/node", "/Users/me/.local/bin/node",
-        "\(nvm)/v22.23.4/bin/node", "\(nvm)/v22.9.0/bin/node", "\(nvm)/v20.11.0/bin/node"])
-    precondition(SetupDiscovery.nodeCandidates(fakeEnvironment(path: nil, files: [:])).isEmpty)
-    files["/Users/me/.local/bin/omp"] = exec; files["/custom/bin/omp"] = exec; files["/Users/me/.bun/bin/omp"] = .directory
-    precondition(SetupDiscovery.ompCandidates(fakeEnvironment(path: "/custom/bin", files: files)) == ["/custom/bin/omp", "/Users/me/.local/bin/omp"])
+    var files: [String: SetupFileKind] = [:]
+    files["/Users/me/.local/bin/omp"] = exec; files["/custom/bin/omp"] = exec; files["/Users/me/.bun/bin/omp"] = .directory; files["rel/omp"] = exec
+    precondition(SetupDiscovery.ompCandidates(fakeEnvironment(path: "/custom/bin:rel:/custom/bin::/missing", files: files)) == ["/custom/bin/omp", "/Users/me/.local/bin/omp"])
     precondition(SetupDiscovery.ompCandidates(fakeEnvironment(path: nil, files: files)) == ["/Users/me/.local/bin/omp"])
-    let tooOld = SetupNodeProbe.tooOld(SetupNodeVersion(major: 20, minor: 0, patch: 0))
-    let fine = SetupNodeProbe.compatible(SetupNodeVersion(major: 22, minor: 23, patch: 4))
-    precondition(SetupDiscovery.preferredNode([("/a", .notRunnable), ("/b", tooOld), ("/c", fine), ("/d", fine)]) == "/c")
-    precondition(SetupDiscovery.preferredNode([("/a", .notRunnable), ("/b", tooOld)]) == nil && SetupDiscovery.preferredNode([]) == nil)
 
     runSetupExistingConfigTests()
     runSetupDraftTests()
@@ -78,7 +52,17 @@ func runSetupModelTests() {
     gate.beginMutation()
     precondition(gate.endMutation() == false, "no quit was requested")
 
-    // Child PATH: configured Node and omp directories first, inherited entries kept in order, no duplicates or empties.
+    // Child PATH: the Node and omp directories first, inherited entries kept in order, no duplicates or empties.
+    // The Node directory is the config's while it exists; a dangling one (pruned managed runtime) falls back to the managed Node.
+    let managed = "/Users/me/Library/Application Support/omp-usage-panel/runtime/node-9.9.9-arm64/node"
+    let live: (String) -> Bool = { $0 == "/opt/n/bin" || $0 == "/Users/me/Library/Application Support/omp-usage-panel/runtime/node-9.9.9-arm64" }
+    precondition(ChildEnvironment.pathNode(configured: "/opt/n/bin/node", managed: managed, directoryExists: live) == "/opt/n/bin/node", "legacy Node directory that exists keeps today's PATH")
+    precondition(ChildEnvironment.pathNode(configured: "/gone/runtime/node-9.0.0-arm64/node", managed: managed, directoryExists: live) == managed, "dangling Node directory falls back to the managed one")
+    precondition(ChildEnvironment.pathNode(configured: "relative/node", managed: managed, directoryExists: { _ in true }) == managed)
+    precondition(ChildEnvironment.path(nodePath: ChildEnvironment.pathNode(configured: "/opt/n/bin/node", managed: managed, directoryExists: live), ompPath: "/o/bin/omp", basePath: "/usr/bin") == "/opt/n/bin:/o/bin:/usr/bin")
+    precondition(ChildEnvironment.path(nodePath: ChildEnvironment.pathNode(configured: "/gone/node", managed: managed, directoryExists: live), ompPath: "/o/bin/omp", basePath: "/usr/bin") == "/Users/me/Library/Application Support/omp-usage-panel/runtime/node-9.9.9-arm64:/o/bin:/usr/bin")
+    precondition(ChildEnvironment.path(nodePath: ChildEnvironment.pathNode(configured: managed, managed: managed, directoryExists: live), ompPath: "/o/bin/omp", basePath: "/usr/bin") == "/Users/me/Library/Application Support/omp-usage-panel/runtime/node-9.9.9-arm64:/o/bin:/usr/bin", "identical configured and managed directories appear once")
+    precondition(ChildEnvironment.directoryExists("/") && !ChildEnvironment.directoryExists("/definitely/not/here") && !ChildEnvironment.directoryExists("/etc/hosts"))
     precondition(ChildEnvironment.path(nodePath: "/n/bin/node", ompPath: "/o/bin/omp", basePath: "/usr/bin:/n/bin::/bin") == "/n/bin:/o/bin:/usr/bin:/bin")
     precondition(ChildEnvironment.path(nodePath: "/n/bin/node", ompPath: "/n/bin/omp", basePath: nil) == "/n/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     precondition(ChildEnvironment.path(nodePath: "", ompPath: "relative/omp", basePath: "") == ChildEnvironment.fallbackPath)
@@ -118,70 +102,57 @@ private func runSetupExistingConfigTests() {
 
 private func runSetupDraftTests() {
     let exec = SetupFileKind.file(executable: true)
-    let files: [String: SetupFileKind] = ["/n/bin/node": exec, "/o/bin/omp": exec, "/d": .directory, "/opt/n/bin/node": exec]
+    let files: [String: SetupFileKind] = ["/o/bin/omp": exec, "/d": .directory]
     let kind: (String) -> SetupFileKind = { files[$0] ?? .missing }
-    let compatible = SetupNodeProbe.compatible(SetupNodeVersion(major: 22, minor: 23, patch: 4))
 
-    // Fresh install: suggestions only, defaults visible, ready only after a compatible probe of the CURRENT path.
-    var draft = SetupDraft(existing: .none, suggestedNode: "/n/bin/node", suggestedOmp: "/o/bin/omp")
+    // Fresh install: suggestions only, defaults visible; ready as soon as omp and the profile are usable (no Node step).
+    var draft = SetupDraft(existing: .none, suggestedOmp: "/o/bin/omp")
     precondition(draft.profile == "default" && !draft.isReadOnly && !draft.isRefused && !draft.isDirty)
-    precondition(draft.blocker(kind: kind) == .nodeProbing && draft.request(sourceAppPath: "/s", hostPid: 7, kind: kind) == nil)
-    draft.record(nodeProbe: compatible, for: "/elsewhere")
-    precondition(draft.blocker(kind: kind) == .nodeProbing, "a probe for another path is ignored")
-    draft.record(nodeProbe: compatible, for: "/n/bin/node")
     precondition(draft.canInstall(kind: kind) && !draft.isDirty, "accepting the suggestions is not an edit")
-    precondition(draft.request(sourceAppPath: "/s/OMP Usage.app", hostPid: 7, kind: kind) == SetupRequest(sourceAppPath: "/s/OMP Usage.app", hostPid: 7, nodePath: "/n/bin/node", ompPath: "/o/bin/omp", profile: "default"))
+    precondition(draft.request(sourceAppPath: "/s/OMP Usage.app", hostPid: 7, kind: kind) == SetupRequest(sourceAppPath: "/s/OMP Usage.app", hostPid: 7, ompPath: "/o/bin/omp", profile: "default"))
 
-    // Editing invalidates the probe and the verdict follows the field, not a stale measurement.
-    draft.setNodePath("/opt/n/bin/node")
-    precondition(draft.isDirty && draft.currentNodeProbe == nil && draft.blocker(kind: kind) == .nodeProbing)
-    draft.record(nodeProbe: SetupNodeProbe.tooOld(SetupNodeVersion(major: 20, minor: 0, patch: 0)), for: "/opt/n/bin/node")
-    precondition(draft.blocker(kind: kind) == .nodeTooOld(SetupNodeVersion(major: 20, minor: 0, patch: 0)))
-    draft.setNodePath("/d"); precondition(draft.blocker(kind: kind) == .node(.directory))
-    draft.setNodePath(""); precondition(draft.blocker(kind: kind) == .node(.empty))
-    draft.setNodePath("/n/bin/node"); draft.record(nodeProbe: compatible, for: "/n/bin/node")
-    draft.setOmpPath("/d"); precondition(draft.blocker(kind: kind) == .omp(.directory))
+    // Editing follows the field, not a stale measurement.
+    draft.setOmpPath("/d"); precondition(draft.isDirty && draft.blocker(kind: kind) == .omp(.directory))
     draft.setOmpPath("/missing"); precondition(draft.blocker(kind: kind) == .omp(.missing))
+    draft.setOmpPath(""); precondition(draft.blocker(kind: kind) == .omp(.empty))
     draft.setOmpPath("/o/bin/omp"); draft.setProfile(" \t"); precondition(draft.blocker(kind: kind) == .profile)
     draft.setProfile("  work "); precondition(draft.canInstall(kind: kind))
     precondition(draft.request(sourceAppPath: "/s", hostPid: 1, kind: kind)?.profile == "  work ", "values are sent verbatim, never normalized")
-    precondition(draft.blockerMessage(.nodeProbing).contains("Node") && draft.blockerMessage(.nodeTooOld(SetupNodeVersion.minimum)).contains("22.18"))
     var restored = draft
-    restored.setNodePath("/n/bin/node"); restored.setOmpPath("/o/bin/omp"); restored.setProfile("default")
+    restored.setOmpPath("/o/bin/omp"); restored.setProfile("default")
     precondition(!restored.isDirty, "returning to the shown values is clean")
 
-    // Valid existing config: authoritative and read-only, and the request carries no overriding values.
-    let json = validConfigJSON.data(using: .utf8)!
-    let config = try! PanelConfigStore.decode(json)
-    var existing = SetupDraft(existing: .valid(config), suggestedNode: "/n/bin/node", suggestedOmp: "/o/bin/omp")
-    precondition(existing.isReadOnly && existing.nodePath == "/opt/n/bin/node" && existing.ompPath == "/opt/o/bin/omp" && existing.profile == "work")
-    existing.setNodePath("/n/bin/node"); existing.setOmpPath("/x"); existing.setProfile("changed")
-    precondition(existing.nodePath == "/opt/n/bin/node" && existing.ompPath == "/opt/o/bin/omp" && existing.profile == "work" && !existing.isDirty)
-    precondition(existing.blocker(kind: kind) == .nodeProbing)
-    existing.record(nodeProbe: compatible, for: "/opt/n/bin/node")
-    precondition(existing.canInstall(kind: { files[$0] ?? .missing }), "only the helper's Node must be usable")
-    precondition(existing.canInstall(kind: { $0 == "/opt/n/bin/node" ? exec : .missing }), "a missing omp does not block an existing authoritative config")
-    precondition(existing.request(sourceAppPath: "/s", hostPid: 9, kind: kind) == SetupRequest(sourceAppPath: "/s", hostPid: 9, nodePath: nil, ompPath: nil, profile: nil))
-    precondition(existing.helperNodePath == "/opt/n/bin/node")
+    // Valid existing config: authoritative and read-only, not blocked by anything (the legacy Node path is never probed),
+    // and the request carries no overriding values.
+    let config = try! PanelConfigStore.decode(validConfigJSON.data(using: .utf8)!)
+    var existing = SetupDraft(existing: .valid(config), suggestedOmp: "/o/bin/omp")
+    precondition(existing.isReadOnly && existing.ompPath == "/opt/o/bin/omp" && existing.profile == "work")
+    existing.setOmpPath("/x"); existing.setProfile("changed")
+    precondition(existing.ompPath == "/opt/o/bin/omp" && existing.profile == "work" && !existing.isDirty)
+    precondition(existing.blocker(kind: { _ in .missing }) == nil, "a missing omp or Node path does not block an existing authoritative config")
+    precondition(existing.request(sourceAppPath: "/s", hostPid: 9, kind: { _ in .missing }) == SetupRequest(sourceAppPath: "/s", hostPid: 9, ompPath: nil, profile: nil))
 
     // Refused config: install stays blocked with the controlled reason; nothing can unblock it from the form.
-    var refused = SetupDraft(existing: .refused("Invalid panel configuration: version must be 1."), suggestedNode: "/n/bin/node", suggestedOmp: "/o/bin/omp")
+    var refused = SetupDraft(existing: .refused("Invalid panel configuration: version must be 1."), suggestedOmp: "/o/bin/omp")
     precondition(refused.isRefused && refused.blocker(kind: kind) == .refusedConfig && !refused.canInstall(kind: kind))
-    refused.record(nodeProbe: compatible, for: "/n/bin/node")
-    refused.setNodePath("/n/bin/node")
+    refused.setOmpPath("/o/bin/omp")
     precondition(refused.blocker(kind: kind) == .refusedConfig && refused.request(sourceAppPath: "/s", hostPid: 1, kind: kind) == nil)
     precondition(refused.blockerMessage(.refusedConfig).contains("version must be 1"))
 
-    // No Node at all: the form still works, install is blocked by the empty Node path, and an omp suggestion is kept.
-    let none = SetupDraft(existing: .none, suggestedNode: "", suggestedOmp: "/o/bin/omp")
-    precondition(none.blocker(kind: kind) == .node(.empty) && none.ompPath == "/o/bin/omp")
+    // No omp found: the form still works and install is blocked by the empty omp path.
+    let none = SetupDraft(existing: .none, suggestedOmp: "")
+    precondition(none.blocker(kind: kind) == .omp(.empty))
+
+    // App-originated node failures carry their own controlled text; the code alone gets generic bundled-runtime wording.
+    precondition(SetupFailure(code: "node-unavailable").userMessage.contains("bundled Node.js"))
+    precondition(SetupFailure(code: "node-unavailable", detail: ManagedNodeError.archiveMismatch.userMessage).userMessage == ManagedNodeError.archiveMismatch.userMessage)
 }
 
 private func runSetupProtocolTests() {
     // Request: only accepted keys, none for nil optionals, stable order.
-    let full = SetupRequest(sourceAppPath: "/Volumes/OMP Usage/OMP Usage.app", hostPid: 42, nodePath: "/n/node", ompPath: "/o/omp", profile: "default")
-    precondition(String(decoding: try! full.encoded(), as: UTF8.self) == #"{"hostPid":42,"nodePath":"/n/node","ompPath":"/o/omp","profile":"default","sourceAppPath":"/Volumes/OMP Usage/OMP Usage.app"}"#)
-    let bare = SetupRequest(sourceAppPath: "/a", hostPid: 1, nodePath: nil, ompPath: nil, profile: nil)
+    let full = SetupRequest(sourceAppPath: "/Volumes/OMP Usage/OMP Usage.app", hostPid: 42, ompPath: "/o/omp", profile: "default")
+    precondition(String(decoding: try! full.encoded(), as: UTF8.self) == #"{"hostPid":42,"ompPath":"/o/omp","profile":"default","sourceAppPath":"/Volumes/OMP Usage/OMP Usage.app"}"#)
+    let bare = SetupRequest(sourceAppPath: "/a", hostPid: 1, ompPath: nil, profile: nil)
     precondition(String(decoding: try! bare.encoded(), as: UTF8.self) == #"{"hostPid":1,"sourceAppPath":"/a"}"#)
 
     func parse(_ json: String, status: Int32 = 0, command: SetupCommand = .install) -> Result<SetupSuccess, SetupFailure> {

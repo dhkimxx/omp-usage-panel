@@ -6,8 +6,9 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readF
 import path from 'node:path'
 import { DmgCleanupError, createDmg, dmgAppName, dmgNote, dmgNoteName } from './dmg.mjs'
 import { appTreeHash } from './ownership.mjs'
-import { archiveName, createPreparedPackage, downloadURL, emptyFeed, feedItems, parseItem, prepareFromCandidate, prunedFeed, removeTemporaryTree, verifyFeedText, verifyPrepared, verifyReleaseAsset, withTemporaryDirectory } from './release.mjs'
-import { buildFixtureApp, inTemp, recordingHdiutil, signerFor } from './release-fixtures.mjs'
+import { archiveName, createPreparedPackage, downloadURL, emptyFeed, feedItems, inspectArchive, parseItem, prepareArchive, prepareFromCandidate, prunedFeed, removeTemporaryTree, verifyFeedText, verifyPrepared, verifyReleaseAsset, withTemporaryDirectory } from './release.mjs'
+import { buildFixtureApp, fixtureNodePin, inTemp, recordingHdiutil, signerFor } from './release-fixtures.mjs'
+import { verifyNodeResources } from './sparkle.mjs'
 
 // Real consumer boundaries: a universal ad-hoc-signed fixture app, a real compressed DMG attached read-only through hdiutil,
 // and Ed25519 signatures verified by the production code. Only the Keychain-backed signer is replaced by an in-process key.
@@ -49,11 +50,11 @@ function prepare(directory, options = {}) {
   const sourceCommit = 'sourceCommit' in options ? options.sourceCommit : head
   const stage = path.join(directory, name)
   mkdirSync(stage)
-  createPreparedPackage({ app, stage, version, notes: packageNotes, sourceCommit, currentFeed, appTreeHash, signer, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000' })
+  createPreparedPackage({ app, stage, version, notes: packageNotes, sourceCommit, currentFeed, appTreeHash, signer, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000', nodePin: fixtureNodePin })
   return stage
 }
 /** @param {string} output @param {Partial<Parameters<typeof verifyPrepared>[0]>} [overrides] */
-const verify = (output, overrides = {}) => verifyPrepared({ output, version, notes, publicEDKey, currentFeed, appTreeHash, head, ...overrides })
+const verify = (output, overrides = {}) => verifyPrepared({ output, version, notes, publicEDKey, currentFeed, appTreeHash, head, nodePin: fixtureNodePin, ...overrides })
 /** Replaces text in the signed candidate feed and signs it again with `signWith`. @param {string} output @param {(feed: string) => string} mutate @param {TestSigner} [signWith] */
 function rewriteFeed(output, mutate, signWith = signer) {
   const file = path.join(output, 'appcast.xml')
@@ -180,6 +181,78 @@ test('an archive signed with another key is rejected before the image is ever at
   assert.deepEqual(accepted.attached, [asset], 'the correctly signed image was attached read-only exactly once and inspected')
 }))
 
+/** Re-seals the fixture app after a resource edit, so only the bundled Node check can object. @param {string} app */
+const reseal = app => execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'pipe' })
+
+test('a newly built package refuses an app whose bundled Node is missing, inconsistent or tampered, even when the app is validly signed', darwin, () => inTemp(directory => {
+  const app = buildFixtureApp(directory), resources = path.join(app, 'Contents/Resources/node')
+  const manifestFile = path.join(resources, 'manifest.json'), archive = path.join(resources, 'node-x64.tar.xz')
+  const manifest = readFileSync(manifestFile, 'utf8'), archiveBytes = readFileSync(archive)
+  let attempt = 0
+  /** @param {RegExp} expected @param {string} label */
+  const refused = (expected, label) => {
+    reseal(app)
+    assert.throws(() => prepare(directory, { app, name: `refused-${attempt++}` }), expected, label)
+  }
+  const edited = JSON.parse(manifest)
+  edited.arches.x64.archiveSize += 1
+  writeFileSync(manifestFile, JSON.stringify(edited)); refused(/archive differs from its manifest/, 'manifest size does not match the archive')
+  edited.arches.x64.archiveSize -= 1; edited.version = '0.0.1'
+  writeFileSync(manifestFile, JSON.stringify(edited)); refused(/pinned/, 'manifest version is not the pinned one')
+  edited.version = JSON.parse(manifest).version; edited.arches.x64.binarySHA256 = 'f'.repeat(64)
+  writeFileSync(manifestFile, JSON.stringify(edited)); refused(/differs from the pin/, 'manifest binary identity is not the pinned one')
+  writeFileSync(manifestFile, manifest); writeFileSync(archive, Buffer.concat([archiveBytes, Buffer.from([0])])); refused(/archive differs from its manifest/, 'archive bytes changed')
+  writeFileSync(archive, archiveBytes); rmSync(archive); refused(/archive differs from its manifest/, 'archive missing')
+  writeFileSync(archive, archiveBytes)
+  // Self-consistent manifest and archive hash, but the `node` inside is not the pinned binary: only the content check can see it.
+  const scratch = mkdtempSync(path.join(directory, 'poison-'))
+  writeFileSync(path.join(scratch, 'node'), 'poisoned node\n', { mode: 0o755 }); writeFileSync(path.join(scratch, 'LICENSE'), 'license\n')
+  execFileSync('/usr/bin/tar', ['-cJf', archive, '-C', scratch, 'node', 'LICENSE'], { env: { ...process.env, COPYFILE_DISABLE: '1' } })
+  const poisoned = readFileSync(archive)
+  edited.arches.x64.binarySHA256 = JSON.parse(manifest).arches.x64.binarySHA256
+  edited.arches.x64.archiveSize = poisoned.length; edited.arches.x64.archiveSHA256 = createHash('sha256').update(poisoned).digest('hex')
+  writeFileSync(manifestFile, JSON.stringify(edited)); refused(/node binary that differs from the pin/, 'archive holds other node bytes than the pin')
+  reseal(app)
+  assert.equal(verifyNodeResources(app, { required: true, matchPin: false }), true, 'without a pin comparison (published releases) the same resources are structurally fine')
+  writeFileSync(manifestFile, manifest)
+  writeFileSync(archive, archiveBytes); rmSync(resources, { recursive: true }); refused(/no bundled Node runtime/, 'no bundled Node at all')
+  assert.deepEqual(readdirSync(path.join(directory, 'refused-0')), [], 'a refused package leaves no archive behind')
+}))
+
+test('an app built before Node was bundled still verifies as a published release, but is refused as a new build or CI candidate', darwin, () => inTemp(directory => {
+  const app = buildFixtureApp(directory, { bundledNode: false })
+  assert.throws(() => prepare(directory, { app, name: 'new-build' }), /no bundled Node runtime/)
+  const stage = path.join(directory, 'old-release'); mkdirSync(stage)
+  const archive = createDmg({ app, output: path.join(stage, archiveName(version)) })
+  prepareArchive({ archive, version, notes, sourceCommit: head, currentFeed, signer, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000', inspect: file => inspectArchive({ file, version, appTreeHash }) })
+  const item = parseItem(/** @type {string} */ (feedItems(readFileSync(path.join(stage, 'appcast.xml'), 'utf8')).at(-1)))
+  assert.equal(verifyReleaseAsset({ file: archive, item, version, publicEDKey, appTreeHash }), sha256Of(archive), 'a published release without node resources keeps verifying')
+  assert.throws(() => verifyReleaseAsset({ file: archive, item, version, publicEDKey, appTreeHash, requireBundledNode: true }), /no bundled Node runtime/)
+  assert.throws(() => verify(stage), /no bundled Node runtime/, 'publishing refuses a package without the bundled runtime')
+  const candidateStage = path.join(directory, 'candidate-stage'); mkdirSync(candidateStage)
+  const candidate = { archivePath: archive, sha256: sha256Of(archive), manifest: { sourceCommit: head, appTreeSHA256: appTreeHash(app) }, provenance: {} }
+  const spy = { signed: /** @type {string[]} */ ([]), signArchive: (/** @type {string} */ file) => { spy.signed.push(file); return signer.signArchive(file) }, signFeed: signer.signFeed }
+  assert.throws(() => prepareFromCandidate({ candidate, stage: candidateStage, version, notes, currentFeed, appTreeHash, signer: spy }), /no bundled Node runtime/)
+  assert.deepEqual(spy.signed, [], 'a CI candidate without the bundled runtime is never signed')
+}))
+
+test('from the first bundled version on, a published release must carry structurally valid node resources; its manifest is not compared with the current pin', darwin, () => inTemp(directory => {
+  const stage = path.join(directory, 'stage'); mkdirSync(stage)
+  /** @param {string} appVersion @param {boolean} bundledNode */
+  const publish = (appVersion, bundledNode) => {
+    const app = buildFixtureApp(directory, { version: appVersion, bundledNode })
+    const archive = createDmg({ app, output: path.join(stage, archiveName(appVersion)) })
+    prepareArchive({ archive, version: appVersion, notes, sourceCommit: head, currentFeed, signer, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000', inspect: () => appTreeHash(app) })
+    return { archive, item: parseItem(/** @type {string} */ (feedItems(readFileSync(path.join(stage, 'appcast.xml'), 'utf8')).at(-1))) }
+  }
+  const missing = publish('1.1.0', false)
+  assert.throws(() => verifyReleaseAsset({ file: missing.archive, item: missing.item, version: '1.1.0', publicEDKey, appTreeHash }), /no bundled Node runtime/)
+  rmSync(path.join(stage, 'appcast.xml')); rmSync(path.join(stage, 'release.json'))
+  // The fixtures' binary identity is not the committed pin's (as after a later pin bump): the published release still verifies.
+  const present = publish('1.1.1', true)
+  assert.equal(verifyReleaseAsset({ file: present.archive, item: present.item, version: '1.1.1', publicEDKey, appTreeHash }), sha256Of(present.archive))
+}))
+
 // ---- CI candidate promotion: the DMG bytes GitHub built and attested are the bytes that get signed.
 /** @param {string} file */
 const sha256Of = file => createHash('sha256').update(readFileSync(file)).digest('hex')
@@ -207,7 +280,7 @@ test('a CI candidate is signed as the exact attested bytes and then passes the n
   const candidate = ciCandidate(directory), original = readFileSync(candidate.archivePath)
   const stage = path.join(directory, 'package'); mkdirSync(stage)
   const spy = spySigner()
-  const prepared = prepareFromCandidate({ candidate, stage, version, notes, currentFeed, appTreeHash, signer: spy, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000' })
+  const prepared = prepareFromCandidate({ candidate, stage, version, notes, currentFeed, appTreeHash, signer: spy, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000', nodePin: fixtureNodePin })
   const archive = path.join(stage, archiveName(version))
   assert.ok(readFileSync(archive).equals(original), 'the staged DMG is byte-identical to the authenticated candidate, not a rebuild')
   assert.deepEqual(spy.signed, [candidate.sha256], 'the update signature was made over exactly the authenticated bytes')
@@ -229,7 +302,7 @@ test('a CI candidate that fails inspection or differs from the authenticated byt
   /** @param {Candidate} candidate @param {string} label */
   const refused = (candidate, label) => {
     const stage = mkdtempSync(path.join(directory, 'stage-')), spy = spySigner()
-    assert.throws(() => prepareFromCandidate({ candidate, stage, version, notes, currentFeed, appTreeHash, signer: spy }), label)
+    assert.throws(() => prepareFromCandidate({ candidate, stage, version, notes, currentFeed, appTreeHash, signer: spy, nodePin: fixtureNodePin }), label)
     assert.deepEqual(spy.signed, [], `${label}: the signing key was never used`)
     assert.deepEqual(readdirSync(stage), [archiveName(version)], `${label}: no feed or release record was produced`)
   }
@@ -247,7 +320,7 @@ test('a CI candidate that fails inspection or differs from the authenticated byt
   /** @param {string} file */
   const rewriteAndSign = file => { appendFileSync(file, Buffer.from([0])); return signer.signArchive(file) }
   const rewriting = { signArchive: rewriteAndSign, signFeed: signer.signFeed }
-  assert.throws(() => prepareFromCandidate({ candidate: good, stage, version, notes, currentFeed, appTreeHash, signer: rewriting }), 'a signer that rewrites the archive')
+  assert.throws(() => prepareFromCandidate({ candidate: good, stage, version, notes, currentFeed, appTreeHash, signer: rewriting, nodePin: fixtureNodePin }), 'a signer that rewrites the archive')
 }))
 
 test('temporary cleanup never reaches into a mounted volume and never follows links', darwin, () => inTemp(directory => {

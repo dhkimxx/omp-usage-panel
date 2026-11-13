@@ -418,7 +418,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         case .providers: return .providers
         case .labels: return .labels
         case .metrics: return .metrics
-        case .nodePath, .ompPath, .profile: return .runtime
+        case .ompPath, .profile: return .runtime
         }
     }
 
@@ -733,8 +733,6 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         return makePage([
             heading("Runtime"),
             card([
-                pathGroup("Node executable", field: .nodePath, identifier: "general.nodePath", placeholder: "/path/to/node",
-                          help: "Absolute path of the Node.js executable that runs the collector.", choose: #selector(chooseNode)),
                 pathGroup("omp executable", field: .ompPath, identifier: "general.ompPath", placeholder: "/path/to/omp",
                           help: "Absolute path of the omp executable the collector calls.", choose: #selector(chooseOmp)),
                 group([horizontal([profileTitle, profileInput]), profileError,
@@ -1445,7 +1443,6 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         updateModeState()
     }
 
-    @objc private func chooseNode() { chooseFile(for: .nodePath, message: "Choose the Node.js executable") }
     @objc private func chooseOmp() { chooseFile(for: .ompPath, message: "Choose the omp executable") }
 
     private func chooseFile(for field: Draft.Field, message: String) {

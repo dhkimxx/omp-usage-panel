@@ -18,7 +18,6 @@ function fixture() {
   /** @param {string} file @param {string[]} args */
   function run(file, args) {
     commands.push({ file, args })
-    if (file === process.execPath && args[0] === '--version') return 'v22.18.0'
     if (file === '/bin/launchctl') {
       if (args[0] === 'print') {
         if (drainFailures) { drainFailures--; throw new Error('launchd drain failed') }
@@ -73,6 +72,42 @@ test('configuration is retained through uninstall and reinstall', () => {
     const original = readFileSync(f.config, 'utf8')
     uninstall(f.options); assert.equal(existsSync(f.app), false); assert.equal(existsSync(f.agent), false); assert.equal(readFileSync(f.config, 'utf8'), original)
     install(f.options); assert.equal(existsSync(f.app), true); assert.equal(readFileSync(f.config, 'utf8'), original)
+  } finally { f.cleanup() }
+})
+test('uninstall removes the managed Node runtime but keeps configuration, caches and records', () => {
+  const f = fixture()
+  try {
+    install(f.options)
+    const runtime = path.join(f.stateDir, 'runtime'), cache = path.join(f.stateDir, 'cache/usage.json')
+    mkdirSync(path.join(runtime, 'node-22.23.5-arm64'), { recursive: true }); writeFileSync(path.join(runtime, 'node-22.23.5-arm64/node'), 'binary')
+    mkdirSync(path.dirname(cache), { recursive: true }); writeFileSync(cache, 'cached')
+    const original = readFileSync(f.config, 'utf8')
+    assert.ok(uninstall({ ...f.options, dryRun: true }).some(action => action.includes(runtime))); assert.equal(existsSync(runtime), true)
+    uninstall(f.options)
+    assert.equal(existsSync(runtime), false); assert.equal(existsSync(f.app), false)
+    assert.equal(readFileSync(f.config, 'utf8'), original); assert.equal(readFileSync(cache, 'utf8'), 'cached'); assert.equal(existsSync(f.stateFile), true)
+  } finally { f.cleanup() }
+})
+test('a symlinked managed runtime is refused before anything is removed and its target is never touched', () => {
+  const f = fixture()
+  try {
+    install(f.options)
+    const outside = path.join(f.home, 'outside-runtime'), runtime = path.join(f.stateDir, 'runtime')
+    mkdirSync(outside); writeFileSync(path.join(outside, 'keep'), 'keep'); symlinkSync(outside, runtime, 'dir')
+    assert.throws(() => uninstall(f.options), /Refusing to remove a managed runtime/)
+    assert.equal(readlinkSync(runtime), outside); assert.equal(readFileSync(path.join(outside, 'keep'), 'utf8'), 'keep')
+    assert.equal(existsSync(f.app), true); assert.equal(existsSync(f.agent), true); assert.equal(f.stopCount(), 0)
+  } finally { f.cleanup() }
+})
+test('an existing configuration whose legacy Node path is gone is neither validated nor rewritten', () => {
+  const f = fixture()
+  try {
+    install(f.options)
+    const stale = readFileSync(f.config, 'utf8').replace(JSON.stringify(process.execPath), JSON.stringify(path.join(f.home, 'gone/node')))
+    assert.notEqual(stale, readFileSync(f.config, 'utf8')); writeFileSync(f.config, stale)
+    install(f.options)
+    assert.equal(readFileSync(f.config, 'utf8'), stale)
+    assert.equal(f.commands.some(command => command.args[0] === '--version'), false)
   } finally { f.cleanup() }
 })
 test('existing configuration is preserved when reinstalled with different environment defaults', () => {

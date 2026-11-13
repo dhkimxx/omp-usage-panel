@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startPanel(configPath: String) {
         do {
             let configStore = try PanelConfigStore(configPath: configPath)
-            let coordinator = UpdaterCoordinator(config: configStore.config, configPath: configStore.configPath)
+            let coordinator = UpdaterCoordinator(configPath: configStore.configPath)
             let panel = PanelController(configStore: configStore, updater: coordinator)
             updater = coordinator; controller = panel
             panel.start()
@@ -53,8 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showSetup(home: home, notice: existing == .none ? "OMP Usage is not set up for this account yet." : "OMP Usage could not start from its saved configuration. Review the details below.")
             return
         }
-        let request = SetupRequest(sourceAppPath: Bundle.main.bundlePath, hostPid: Int(ProcessInfo.processInfo.processIdentifier), nodePath: nil, ompPath: nil, profile: nil)
-        setupRunner.run(command: .launch, nodePath: config.nodePath, ompPath: config.ompPath, helperPath: helperPath, request: request, timeout: SetupRunner.launchTimeout) { [weak self] result in
+        let request = SetupRequest(sourceAppPath: Bundle.main.bundlePath, hostPid: Int(ProcessInfo.processInfo.processIdentifier), ompPath: nil, profile: nil)
+        // The bundled Node is resolved (and extracted on first use) off the main thread inside the runner.
+        setupRunner.run(command: .launch, ompPath: config.ompPath, helperPath: helperPath, request: request, timeout: SetupRunner.launchTimeout) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let success):
@@ -88,7 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let setup { return setup.applicationShouldTerminate() }
         return updater?.applicationShouldTerminate() ?? .terminateNow
     }
-    func applicationWillTerminate(_ notification: Notification) { controller?.stop(); updater?.stop(); setup?.shutdown() }
+    func applicationWillTerminate(_ notification: Notification) { controller?.stop(); updater?.stop() }
     private func fail(_ message: String) {
         let alert = NSAlert(); alert.messageText = "OMP Usage Panel"; alert.informativeText = message; alert.runModal(); NSApp.terminate(nil)
     }

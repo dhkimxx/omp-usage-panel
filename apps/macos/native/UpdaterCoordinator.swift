@@ -44,8 +44,6 @@ final class UpdaterCoordinator: NSObject, SPUUpdaterDelegate {
 
     // MARK: Collaborators and state
 
-    private var config: PanelConfig
-    private var configPath: String
     /// The current Sparkle session has begun downloading/installing (errors then also use Sparkle's standard alert).
     private var pastDownload = false
     private let hostBundle: Bundle
@@ -57,7 +55,7 @@ final class UpdaterCoordinator: NSObject, SPUUpdaterDelegate {
     private let now: () -> Date
     private let notice = UpdateNoticeWindowController()
     private let progress = UpdateProgressWindowController()
-    private var ownership: UpdateOwnershipRunner
+    private let ownership: UpdateOwnershipRunner
 
     private var updater: SPUUpdater?
     private var driver: UpdateUserDriver?
@@ -130,9 +128,7 @@ final class UpdaterCoordinator: NSObject, SPUUpdaterDelegate {
 
     /// `defaults == nil` follows Sparkle's own domain semantics: the host bundle's `SUDefaultsDomain` suite when it names
     /// one (so app-owned metadata and Sparkle's preferences always share one domain), otherwise the standard defaults.
-    init(config: PanelConfig, configPath: String, defaults: UserDefaults? = nil, hostBundle: Bundle = .main, now: @escaping () -> Date = Date.init) {
-        self.config = config
-        self.configPath = configPath
+    init(configPath: String, defaults: UserDefaults? = nil, hostBundle: Bundle = .main, now: @escaping () -> Date = Date.init) {
         self.hostBundle = hostBundle
         self.now = now
         let resolvedDefaults: UserDefaults
@@ -144,7 +140,7 @@ final class UpdaterCoordinator: NSObject, SPUUpdaterDelegate {
         self.store = preferences
         let sparkleSettings = SPUUpdaterSettings(hostBundle: hostBundle)
         self.settings = sparkleSettings
-        self.ownership = UpdateOwnershipRunner(nodePath: config.nodePath, hostBundle: hostBundle, appPath: hostBundle.bundleURL.path, configPath: configPath)
+        self.ownership = UpdateOwnershipRunner(hostBundle: hostBundle, appPath: hostBundle.bundleURL.path, configPath: configPath)
         let installed = (hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         // The persisted Sparkle preference is read before any editable policy is exposed: no provisional default.
         self.policy = UpdatePolicy(automaticChecks: sparkleSettings.automaticallyChecksForUpdates, automaticInstallation: preferences.preferences.automaticInstallation,
@@ -234,13 +230,6 @@ final class UpdaterCoordinator: NSObject, SPUUpdaterDelegate {
         notice.dismiss()
         noticePending = false
         startAfterAcknowledgement = false
-    }
-
-    /// Node path changes update the ownership runtime context; profile and other collector changes do not touch policy.
-    func updateRuntime(config: PanelConfig, configPath: String) {
-        self.config = config
-        self.configPath = configPath
-        ownership = UpdateOwnershipRunner(nodePath: config.nodePath, hostBundle: hostBundle, appPath: hostBundle.bundleURL.path, configPath: configPath)
     }
 
     // MARK: Termination guard
@@ -1329,10 +1318,11 @@ struct UpdateOwnershipRunner {
     static let modulePath = "runtime/apps/macos/update-ownership.mjs"
     static let timeout: TimeInterval = 35
 
-    let nodePath: String
     let hostBundle: Bundle
     let appPath: String
     let configPath: String
+    /// Resolves the managed Node runtime (extracting it on first use). Injectable so the bundle is the only input.
+    var resolveNode: (Bundle) -> Result<String, ManagedNodeError> = { ManagedNode.ensure(bundle: $0) }
 
     func run<T: Decodable>(_ type: T.Type, command: String, extra: [String: Any] = [:]) -> Result<T, UpdateOwnershipFailure> {
         func failure(_ code: String, _ message: String) -> Result<T, UpdateOwnershipFailure> { .failure(UpdateOwnershipFailure(code: code, message: message, recovery: nil)) }
@@ -1342,12 +1332,17 @@ struct UpdateOwnershipRunner {
         guard let input = try? UpdateOwnershipCodec.request(appPath: appPath, configPath: configPath, extra: extra) else {
             return failure("invalid-request", "The update ownership request could not be encoded.")
         }
+        let node: String
+        switch resolveNode(hostBundle) {
+        case .success(let path): node = path
+        case .failure(let error): return failure("node-unavailable", error.userMessage)
+        }
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: nodePath)
+        task.executableURL = URL(fileURLWithPath: node)
         task.arguments = [module, command]
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         task.standardInput = stdin; task.standardOutput = stdout; task.standardError = stderr
-        do { try task.run() } catch { return failure("node-unavailable", "Node.js could not be started from the configured path.") }
+        do { try task.run() } catch { return failure("node-unavailable", "The bundled Node.js runtime could not be started.") }
         let group = DispatchGroup()
         let lock = NSLock()
         var output = Data()

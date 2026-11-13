@@ -1,18 +1,18 @@
 # omp-usage-panel
 
-Standalone usage panel for [omp](https://github.com/can1357/oh-my-pi): a native macOS AppKit app on a shared Node.js collector. No interactive omp session required.
+Standalone usage panel for [omp](https://github.com/can1357/oh-my-pi): a native macOS AppKit app with a bundled Node.js collector. No interactive omp session required and no Node.js installation needed.
 
 It shows whichever providers and accounts your installed omp supports. Installing or removing it does not install, retarget, or remove provider plugins.
 
 ## Install
 
-Requires macOS 13+, an existing Node.js **22.18+** and an authenticated omp that supports `omp usage --json` (tested with omp 18.18.6). Node and omp are not bundled or installed for you; no repository checkout or Swift compiler is needed.
+Requires macOS 13+ and an authenticated omp that supports `omp usage --json` (tested with omp 18.18.6). Node.js is bundled: the app ships a pinned official Node.js 22 (about 49 MB for both architectures) and, on first run, extracts the copy for your Mac's architecture to `~/Library/Application Support/omp-usage-panel/runtime/` (about 113 MB, excluded from backups, verified against pinned hashes and Node.js's Developer ID signature). Your own Node.js, whatever its version, is never used to run the app. omp is not bundled or installed for you; no repository checkout or Swift compiler is needed.
 
 1. Download the DMG from the [latest GitHub release](https://github.com/dhkimxx/omp-usage-panel/releases/latest) and open it.
 2. Open **OMP Usage.app** from the DMG (or from Downloads).
-3. In the setup window, check the auto-detected Node and omp paths (edit or browse if needed; the omp profile is editable; an existing default config is detected automatically) and click **Install & Open**. Clicking Install also registers a per-user login LaunchAgent.
+3. In the setup window, check the auto-detected omp path (edit or browse if needed; the omp profile is editable; an existing default config is detected automatically) and click **Install & Open**. Clicking Install also registers a per-user login LaunchAgent.
 
-There is no `/Applications` shortcut. The app copies itself, without admin rights, to the existing managed location `~/Applications/OMP Usage.app` (quarantine and extended attributes preserved), writes its configuration and LaunchAgent, then relaunches from there. Setup does not read, copy or change omp credentials or plugins; the dashboard itself calls `omp usage`, which uses omp's own authentication. An existing valid `config.json` is kept unchanged and its paths and profile are used; an invalid one is reported, not overwritten. Node and omp must stay at the paths in `config.json`.
+There is no `/Applications` shortcut. The app copies itself, without admin rights, to the existing managed location `~/Applications/OMP Usage.app` (quarantine and extended attributes preserved), writes its configuration and LaunchAgent, then relaunches from there. Setup does not read, copy or change omp credentials or plugins; the dashboard itself calls `omp usage`, which uses omp's own authentication. An existing valid `config.json` is kept unchanged and its omp path and profile are used; an invalid one is reported, not overwritten. omp must stay at the path in `config.json`.
 
 **Signing:** no Apple Developer ID is used. The app is ad-hoc/Ed25519-signed and not notarized, so macOS Gatekeeper may block the first downloaded copy before the app runs; the setup window cannot address that. This project gives no instructions to bypass quarantine.
 
@@ -91,7 +91,7 @@ The file is `~/Library/Application Support/omp-usage-panel/config.json`; editing
 | `warnPercent` / `criticalPercent` | `70` / `90` | Thresholds |
 | `showPace` | `true` | Show the elapsed-period marker |
 
-`nodePath` and `ompPath` must be absolute. `profile` (default `default`) names the omp profile that holds authentication. Metric limit IDs are at `snapshot.accounts[].limits[].id` in collector output. Choosing a metric changes only the display, not omp's account selection.
+`ompPath` must be absolute. `nodePath` is kept only for compatibility with earlier versions and must still be an absolute path, but it is no longer edited in Settings and the app never runs it: collection, setup and updates always use the bundled Node.js. Its directory is still placed first on the `PATH` given to omp, so an omp wrapper that runs `env node` resolves the same Node.js as before (new installs point it at the bundled runtime). `profile` (default `default`) names the omp profile that holds authentication. Metric limit IDs are at `snapshot.accounts[].limits[].id` in collector output. Choosing a metric changes only the display, not omp's account selection.
 
 ## Collector
 
@@ -104,7 +104,7 @@ node packages/usage-core/cli.mjs --refresh  # runs `omp usage invalidate` first
 
 ## Updates
 
-After installation, the app checks GitHub for new versions. Updates are prebuilt universal (arm64 + x86_64) apps downloaded from [GitHub Releases](https://github.com/dhkimxx/omp-usage-panel/releases); no Xcode or source build is needed for them. Node.js 22.18+ and omp are still required.
+After installation, the app checks GitHub for new versions. Updates are prebuilt universal (arm64 + x86_64) apps downloaded from [GitHub Releases](https://github.com/dhkimxx/omp-usage-panel/releases); no Xcode or source build is needed for them. Node.js is bundled; only omp is still required. The first update from 1.0.x to a version with the bundled Node.js is still carried out by the installed 1.0.x app, which needs the Node.js in its `config.json` until the update finishes; after that the path is not used again.
 
 - **Defaults:** daily checks on, notifications on, automatic installation **off**.
 - **Settings → Updates** (app-wide, not per omp profile) holds these controls and uses the same **Save & Apply** / **Cancel** as the rest of Settings. **Check for Updates…** in the menu runs a manual check, which ignores Skip and turned-off notifications.
@@ -133,6 +133,8 @@ Release flow: `release:package` builds the single DMG and signed feed item; `rel
 
 Sparkle 2.10.1 (pinned) is bundled for updates; see its license terms.
 
+Node.js (MIT, official Developer ID-signed build) is bundled as `node-<arch>.tar.xz` archives under `Contents/Resources/node/`, built from the pinned tarballs in `apps/macos/node-runtime.json` (URL, size, SHA-256 of each official tarball and of its `bin/node`, plus the Node.js Foundation team ID). Builds download, verify and repack them into a cache (`OMP_USAGE_NODE_CACHE`, default `~/Library/Caches/omp-usage-panel/node/<version>`). To move to another Node.js 22 release, replace the pinned values from the official `SHASUMS256.txt` and the extracted binary's hash, then release a new app version; the app extracts the new runtime on its next start. Each archive carries Node.js's `LICENSE`.
+
 ## Uninstall
 
 ```sh
@@ -140,12 +142,12 @@ npm run macos:uninstall -- --dry-run
 npm run macos:uninstall
 ```
 
-Only the owned app and LaunchAgent (`~/Library/LaunchAgents/com.dhkim.omp-usage-panel.plist`) are removed. Configuration, caches, records and provider installations are kept. Modified or foreign files are not deleted.
+Only the owned app, LaunchAgent (`~/Library/LaunchAgents/com.dhkim.omp-usage-panel.plist`) and the extracted bundled Node.js (`~/Library/Application Support/omp-usage-panel/runtime`) are removed. Configuration, caches, records and provider installations are kept. Modified or foreign files are not deleted.
 
-Without the checkout:
+Without the checkout, run the uninstaller with the extracted bundled Node.js (Intel Macs: `x64` instead of `arm64`) or any Node.js 22.18+:
 
 ```sh
-node "$HOME/Applications/OMP Usage.app/Contents/Resources/runtime/apps/macos/uninstall.mjs"
+"$HOME/Library/Application Support/omp-usage-panel/runtime/"node-*-arm64/node "$HOME/Applications/OMP Usage.app/Contents/Resources/runtime/apps/macos/uninstall.mjs"
 ```
 
 ## Development

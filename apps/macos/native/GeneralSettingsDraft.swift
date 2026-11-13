@@ -149,7 +149,7 @@ struct GeneralSettingsDraft: Equatable {
     enum RowList: CaseIterable, Hashable { case providers, labels, metrics }
 
     enum Field: Hashable {
-        case nodePath, ompPath, profile
+        case ompPath, profile
         case refreshSeconds, cacheMinutes, timeoutSeconds, warnPercent, criticalPercent
         case providers, labels, metrics
         /// Staged total compact slots of the currently edited compact profile.
@@ -157,7 +157,6 @@ struct GeneralSettingsDraft: Equatable {
 
         init?(configKey: String) {
             switch configKey {
-            case "nodePath": self = .nodePath
             case "ompPath": self = .ompPath
             case "profile": self = .profile
             case "refreshSeconds": self = .refreshSeconds
@@ -266,7 +265,9 @@ struct GeneralSettingsDraft: Equatable {
     // MARK: State
 
     let version: Int
-    var nodePath: String
+    /// The configuration's legacy Node path: no longer user-editable (every Node process runs from the bundled
+    /// runtime), carried through unchanged so Settings save preserves it exactly.
+    let nodePath: String
     var ompPath: String
     var profile: String
     var refreshSeconds: String
@@ -373,7 +374,6 @@ struct GeneralSettingsDraft: Equatable {
 
     func text(for field: Field) -> String {
         switch field {
-        case .nodePath: return nodePath
         case .ompPath: return ompPath
         case .profile: return profile
         case .refreshSeconds: return refreshSeconds
@@ -388,7 +388,6 @@ struct GeneralSettingsDraft: Equatable {
 
     mutating func setText(_ text: String, for field: Field) {
         switch field {
-        case .nodePath: nodePath = text
         case .ompPath: ompPath = text
         case .profile: profile = text
         case .refreshSeconds: refreshSeconds = text
@@ -459,7 +458,6 @@ struct GeneralSettingsDraft: Equatable {
         var issues: [Issue] = []
         func report(_ field: Field, _ message: String, row rowID: Int? = nil) { issues.append(Issue(field: field, rowID: rowID, message: message)) }
 
-        if PanelConfig.isBlank(nodePath) || !nodePath.hasPrefix("/") { report(.nodePath, "Enter an absolute path starting with /.") }
         if PanelConfig.isBlank(ompPath) || !ompPath.hasPrefix("/") { report(.ompPath, "Enter an absolute path starting with /.") }
         if PanelConfig.isBlank(profile) { report(.profile, "Enter a profile name.") }
 
@@ -514,9 +512,9 @@ struct GeneralSettingsDraft: Equatable {
         do { try config.validate() }
         catch let error as PanelConfigError {
             if case .invalid(let key, let rule) = error {
-                throw Failure(issues: [Issue(field: Field(configKey: key) ?? .nodePath, rowID: nil, message: "Invalid value: \(rule).")])
+                throw Failure(issues: [Issue(field: Field(configKey: key) ?? .ompPath, rowID: nil, message: "Invalid value: \(rule).")])
             }
-            throw Failure(issues: [Issue(field: .nodePath, rowID: nil, message: error.localizedDescription)])
+            throw Failure(issues: [Issue(field: .ompPath, rowID: nil, message: error.localizedDescription)])
         }
         return config
     }

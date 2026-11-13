@@ -6,8 +6,8 @@ import path from 'node:path'
 export const dmgVolumeName = 'OMP Usage'
 export const dmgAppName = 'OMP Usage.app'
 export const dmgNoteName = 'Install.txt'
-/** Short note shipped beside the app. There is deliberately no /Applications shortcut: the app installs itself into ~/Applications. */
-export const dmgNote = `OMP Usage
+/** Note shipped by releases 1.0.0 and 1.0.1 (Node.js required, never bundled). Already-published images carry it, so the layout check still accepts it. */
+export const legacyDmgNote = `OMP Usage
 
 1. Double-click "OMP Usage.app" in this window (or copy it anywhere first).
 2. The app opens a one-time setup. Review the detected Node.js and omp paths, then click "Install & Open".
@@ -23,6 +23,25 @@ Apple Developer ID signed or notarized, so macOS may warn the first time you ope
 macOS prompt (or System Settings > Privacy & Security > Open Anyway) if you trust this download.
 Do not remove quarantine attributes or bypass Gatekeeper.
 `
+/** Short note shipped beside the app. There is deliberately no /Applications shortcut: the app installs itself into ~/Applications. */
+export const dmgNote = `OMP Usage
+
+1. Double-click "OMP Usage.app" in this window (or copy it anywhere first).
+2. The app opens a one-time setup. Review the detected omp path, then click "Install & Open".
+   Clicking Install installs OMP Usage into ~/Applications and registers a per-user login item (LaunchAgent).
+   No administrator password is needed.
+
+Requirements: the omp command-line tool, already installed on this Mac. Node.js is bundled with the app and is not required.
+OMP Usage never installs omp. Setup never reads, edits or copies your omp credentials or plugins.
+Usage collection uses your existing omp installation and its normal authentication.
+
+Trust: this app is ad-hoc signed and its updates are authenticated with an Ed25519 key, but it is not
+Apple Developer ID signed or notarized, so macOS may warn the first time you open it. Use the standard
+macOS prompt (or System Settings > Privacy & Security > Open Anyway) if you trust this download.
+Do not remove quarantine attributes or bypass Gatekeeper.
+`
+/** Every install note an accepted image may carry: the current one and the notes of already-published releases. */
+const acceptedDmgNotes = [dmgNote, legacyDmgNote]
 /** Volume metadata that macOS itself may add to a mounted HFS+ image; any other extra entry is rejected. */
 const volumeMetadata = new Set(['.fseventsd', '.Spotlight-V100', '.Trashes', '.TemporaryItems', '.DocumentRevisions-V100', '.DS_Store'])
 
@@ -84,7 +103,7 @@ export function assertDmgLayout(mountPoint) {
   let appStat, noteStat
   try { appStat = lstatSync(app); noteStat = lstatSync(note) } catch { throw new Error(`DMG must contain exactly ${dmgAppName} and ${dmgNoteName}`) }
   if (!appStat.isDirectory()) throw new Error(`${dmgAppName} in the DMG must be a real app directory, not a link or file`)
-  if (!noteStat.isFile() || readFileSync(note, 'utf8') !== dmgNote) throw new Error(`${dmgNoteName} in the DMG is not the expected install note`)
+  if (!noteStat.isFile() || !acceptedDmgNotes.includes(readFileSync(note, 'utf8'))) throw new Error(`${dmgNoteName} in the DMG is not the expected install note`)
   return app
 }
 
