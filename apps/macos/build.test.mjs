@@ -168,7 +168,7 @@ test('a corrupted cached archive is rebuilt instead of trusted', () => {
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('bundled Node resources: the written layout verifies, tampering is refused, and an app without them only passes when not required', () => {
+test('bundled Node resources: the written layout verifies, tampering is refused, and an app without them (or without every architecture) is refused', () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'omp-node-runtime-'))
   try {
     const dist = fakeNodeDistribution(directory), cache = path.join(directory, 'cache')
@@ -180,37 +180,37 @@ test('bundled Node resources: the written layout verifies, tampering is refused,
     assert.deepEqual(Object.keys(manifest), ['schema', 'version', 'teamIdentifier', 'arches'])
     assert.equal(manifest.schema, 1); assert.equal(manifest.version, pin.version); assert.equal(manifest.teamIdentifier, pin.teamIdentifier)
     assert.deepEqual(Object.keys(manifest.arches.arm64), ['archive', 'archiveSize', 'archiveSHA256', 'binarySize', 'binarySHA256'])
-    assert.equal(verifyNodeResources(app, { required: true, pin }), true)
+    assert.equal(verifyNodeResources(app, { matchPin: true, pin }), true)
 
-    // A host-only (non-universal) build lists one architecture: fine unless every architecture is required.
+    // A host-only (non-universal) build lists one architecture: every supported architecture is always required.
     const hostOnly = path.join(directory, 'host.app')
     writeNodeResources(path.join(hostOnly, 'Contents/Resources/node'), ensureNodeRuntime({ arches: ['arm64'], pin, cache, download: dist.download, signingTeam: dist.signingTeam }))
-    assert.equal(verifyNodeResources(hostOnly, { pin }), true)
-    assert.throws(() => verifyNodeResources(hostOnly, { required: true, pin }), /every supported architecture/)
+    assert.throws(() => verifyNodeResources(hostOnly, { pin }), /every supported architecture/)
+    assert.throws(() => verifyNodeResources(hostOnly, { matchPin: true, pin }), /every supported architecture/)
 
-    const none = path.join(directory, 'old.app'); mkdirSync(path.join(none, 'Contents/Resources'), { recursive: true })
-    assert.equal(verifyNodeResources(none, { pin }), false)
-    assert.throws(() => verifyNodeResources(none, { required: true, pin }), /no bundled Node runtime/)
+    const none = path.join(directory, 'none.app'); mkdirSync(path.join(none, 'Contents/Resources'), { recursive: true })
+    assert.throws(() => verifyNodeResources(none, { pin }), /no bundled Node runtime/)
+    assert.throws(() => verifyNodeResources(none, { matchPin: true, pin }), /no bundled Node runtime/)
 
     const manifestFile = path.join(resources, 'manifest.json'), archive = path.join(resources, 'node-arm64.tar.xz')
     const original = readFileSync(manifestFile, 'utf8'), archiveBytes = readFileSync(archive)
     /** @param {(manifest: any) => void} mutate */
     const rewrite = mutate => { const value = JSON.parse(original); mutate(value); writeFileSync(manifestFile, JSON.stringify(value)) }
-    rewrite(value => { value.version = '9.9.8' }); assert.throws(() => verifyNodeResources(app, { required: true, pin }), /pinned/)
-    assert.equal(verifyNodeResources(app, { required: true, matchPin: false }), true, 'a published release is never compared with the current pin')
-    rewrite(value => { value.teamIdentifier = 'ZZZZZ99999' }); assert.throws(() => verifyNodeResources(app, { required: true, pin }), /team identifier/)
-    assert.equal(verifyNodeResources(app, { required: true, matchPin: false }), true)
-    rewrite(value => { value.arches.arm64.binarySHA256 = '2'.repeat(64) }); assert.throws(() => verifyNodeResources(app, { required: true, pin }), /binary differs from the pin/)
-    rewrite(value => { value.arches.arm64.archiveSHA256 = '3'.repeat(64) }); assert.throws(() => verifyNodeResources(app, { required: true, pin }), /archive differs from its manifest/)
-    assert.throws(() => verifyNodeResources(app, { required: true, matchPin: false }), /archive differs from its manifest/, 'self-consistency is still enforced without a pin')
-    rewrite(value => { value.extra = true }); assert.throws(() => verifyNodeResources(app, { required: true, pin }), /exactly the keys/)
+    rewrite(value => { value.version = '9.9.8' }); assert.throws(() => verifyNodeResources(app, { matchPin: true, pin }), /pinned/)
+    assert.equal(verifyNodeResources(app), true, 'a published release is never compared with the current pin')
+    rewrite(value => { value.teamIdentifier = 'ZZZZZ99999' }); assert.throws(() => verifyNodeResources(app, { matchPin: true, pin }), /team identifier/)
+    assert.equal(verifyNodeResources(app), true)
+    rewrite(value => { value.arches.arm64.binarySHA256 = '2'.repeat(64) }); assert.throws(() => verifyNodeResources(app, { matchPin: true, pin }), /binary differs from the pin/)
+    rewrite(value => { value.arches.arm64.archiveSHA256 = '3'.repeat(64) }); assert.throws(() => verifyNodeResources(app, { matchPin: true, pin }), /archive differs from its manifest/)
+    assert.throws(() => verifyNodeResources(app), /archive differs from its manifest/, 'self-consistency is still enforced without a pin')
+    rewrite(value => { value.extra = true }); assert.throws(() => verifyNodeResources(app, { matchPin: true, pin }), /exactly the keys/)
     writeFileSync(manifestFile, original)
     writeFileSync(archive, Buffer.concat([archiveBytes, Buffer.from('x')]))
-    assert.throws(() => verifyNodeResources(app, { required: true, pin }), /archive differs from its manifest/)
+    assert.throws(() => verifyNodeResources(app, { matchPin: true, pin }), /archive differs from its manifest/)
     writeFileSync(archive, archiveBytes)
     writeFileSync(path.join(resources, 'stray'), 'x')
-    assert.throws(() => verifyNodeResources(app, { required: true, pin }), /files the manifest does not list/)
+    assert.throws(() => verifyNodeResources(app, { matchPin: true, pin }), /files the manifest does not list/)
     rmSync(path.join(resources, 'stray'))
-    assert.equal(verifyNodeResources(app, { required: true, pin }), true)
+    assert.equal(verifyNodeResources(app, { matchPin: true, pin }), true)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

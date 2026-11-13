@@ -241,33 +241,19 @@ export function writeNodeResources(directory, runtime) {
   writeFileSync(path.join(directory, 'manifest.json'), `${JSON.stringify(nodeManifest(runtime), null, 2)}\n`)
 }
 
-/** First app version that bundles the Node runtime; releases before it have no `Contents/Resources/node`. */
-export const firstBundledNodeVersion = '1.1.0'
-/** @param {string} version MAJOR.MINOR.PATCH @returns {boolean} whether an app of this version must carry the bundled Node resources */
-export function hasBundledNode(version) {
-  const a = version.split('.').map(Number), b = firstBundledNodeVersion.split('.').map(Number)
-  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i]
-  return true
-}
-
 /**
- * Checks the bundled Node resources of one app.
- * Always (structural, self-consistency only): strict manifest keys/types, every listed archive present with matching size and SHA-256,
- * archive entries exactly `node` (0755) and `LICENSE`, and no stray files. A release is never compared with the current pin here,
+ * Checks the bundled Node resources of one app; the resources and every supported architecture are always required.
+ * Always (structural, self-consistency): strict manifest keys/types, every listed archive present with matching size and SHA-256,
+ * archive entries exactly `node` (0755) and `LICENSE`, and no stray files. By default an app is never compared with the current pin,
  * so published releases keep verifying after the pin moves.
- * `required`: the app must carry the resources (and every supported architecture). Apps built before the runtime was bundled
- * have none and pass otherwise.
- * `matchPin` (default: `required`; for newly built apps and CI candidates): also compares version, team and binary identity with the
+ * `matchPin` (newly built apps and CI candidates): also compares version, team and binary identity with the
  * pin and hashes the `node` bytes inside each archive against pin.binary.
- * @param {string} app @param {{required?: boolean, matchPin?: boolean, pin?: NodePin|undefined}} [options]
- * @returns {boolean} whether the app carries a bundled runtime
+ * @param {string} app @param {{matchPin?: boolean, pin?: NodePin|undefined}} [options]
+ * @returns {true}
  */
-export function verifyNodeResources(app, { required = false, matchPin = required, pin } = {}) {
+export function verifyNodeResources(app, { matchPin = false, pin } = {}) {
   const directory = path.join(app, 'Contents/Resources/node')
-  if (!existsSync(directory)) {
-    if (required) throw new Error('App has no bundled Node runtime (Contents/Resources/node)')
-    return false
-  }
+  if (!existsSync(directory)) throw new Error('App has no bundled Node runtime (Contents/Resources/node)')
   const expected = matchPin ? (pin ?? readNodePin()) : undefined
   let manifest
   try { manifest = JSON.parse(readFileSync(path.join(directory, 'manifest.json'), 'utf8')) } catch { throw new Error('Bundled Node manifest.json is missing or is not valid JSON') }
@@ -281,7 +267,7 @@ export function verifyNodeResources(app, { required = false, matchPin = required
   if (!isRecord(manifest.arches)) throw new Error('Bundled Node manifest arches must be an object')
   const present = Object.keys(manifest.arches).sort()
   if (!present.length || present.some(arch => !nodeArches.includes(arch))) throw new Error('Bundled Node manifest lists an unknown or no architecture')
-  if (required && present.join() !== [...nodeArches].sort().join()) throw new Error('Bundled Node manifest must list every supported architecture')
+  if (present.join() !== [...nodeArches].sort().join()) throw new Error('Bundled Node manifest must list every supported architecture')
   const expectedFiles = ['manifest.json']
   for (const arch of present) {
     const entry = manifest.arches[arch]

@@ -6,17 +6,27 @@ It shows whichever providers and accounts your installed omp supports. Installin
 
 ## Install
 
-Requires macOS 13+ and an authenticated omp that supports `omp usage --json` (tested with omp 18.18.6). Node.js is bundled: the app ships a pinned official Node.js 22 (about 49 MB for both architectures) and, on first run, extracts the copy for your Mac's architecture to `~/Library/Application Support/omp-usage-panel/runtime/` (about 113 MB, excluded from backups, verified against pinned hashes and Node.js's Developer ID signature). Your own Node.js, whatever its version, is never used to run the app. omp is not bundled or installed for you; no repository checkout or Swift compiler is needed.
+Requires macOS 13+ and an authenticated omp that supports `omp usage --json` (tested with omp 18.18.6). Nothing else has to be installed: Node.js is bundled, and no repository checkout or Swift compiler is needed.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dhkimxx/omp-usage-panel/main/install.sh | sh
+```
+
+The script downloads the latest release DMG, checks its size and SHA-256 against the digest GitHub publishes for that asset, mounts it read-only, installs the app and unmounts it again. It needs no admin rights and never uses `sudo`. Options go after `sh -s --`, for example `curl -fsSL …/install.sh | sh -s -- --omp /absolute/path/to/omp --profile work`; `--version X.Y.Z` installs a specific release. Run the same command again to reinstall (quit the running app first); later versions arrive through the in-app updater (see [Updates](#updates)).
+
+The app is copied, without admin rights, to `~/Applications/OMP Usage.app`; its configuration and a per-user login LaunchAgent are written, and it starts. Installing does not read, copy or change omp credentials or plugins; the dashboard itself calls `omp usage`, which uses omp's own authentication. An existing valid `config.json` is kept unchanged and its omp path and profile are used; an invalid one is reported, not overwritten. omp must stay at the path in `config.json`.
+
+**Signing and Gatekeeper:** no Apple Developer ID is used. The app is ad-hoc/Ed25519-signed and not notarized. macOS marks files that a browser downloads with a quarantine attribute and then blocks the first launch of an unnotarized app; files fetched by `curl` are not marked, so the one-line installer never triggers that prompt. Its trust model is the one you already extend by running it: TLS to GitHub for the script, the release metadata and the DMG, with the DMG checked against the digest in the same API response. Read [`install.sh`](install.sh) before running it.
+
+**Bundled Node.js:** the app ships a pinned official Node.js 22 (about 49 MB for both architectures) and, on first run, extracts the copy for your Mac's architecture to `~/Library/Application Support/omp-usage-panel/runtime/` (about 113 MB, excluded from backups, verified against pinned hashes and Node.js's Developer ID signature). Your own Node.js, whatever its version, is never used to run the app. omp is not bundled or installed for you.
+
+### Manual install (DMG)
 
 1. Download the DMG from the [latest GitHub release](https://github.com/dhkimxx/omp-usage-panel/releases/latest) and open it.
-2. Open **OMP Usage.app** from the DMG (or from Downloads).
-3. In the setup window, check the auto-detected omp path (edit or browse if needed; the omp profile is editable; an existing default config is detected automatically) and click **Install & Open**. Clicking Install also registers a per-user login LaunchAgent.
+2. Open **OMP Usage.app** from the DMG (or from Downloads). A browser-downloaded copy is quarantined, so macOS asks you to allow it in System Settings → Privacy & Security first; this project gives no instructions to bypass quarantine.
+3. In the setup window, check the auto-detected omp path (edit or browse if needed; the omp profile is editable; an existing default config is detected automatically) and click **Install & Open**. Clicking Install also registers the per-user login LaunchAgent.
 
-There is no `/Applications` shortcut. The app copies itself, without admin rights, to the existing managed location `~/Applications/OMP Usage.app` (quarantine and extended attributes preserved), writes its configuration and LaunchAgent, then relaunches from there. Setup does not read, copy or change omp credentials or plugins; the dashboard itself calls `omp usage`, which uses omp's own authentication. An existing valid `config.json` is kept unchanged and its omp path and profile are used; an invalid one is reported, not overwritten. omp must stay at the path in `config.json`.
-
-**Signing:** no Apple Developer ID is used. The app is ad-hoc/Ed25519-signed and not notarized, so macOS Gatekeeper may block the first downloaded copy before the app runs; the setup window cannot address that. This project gives no instructions to bypass quarantine.
-
-Later versions arrive through the in-app updater (see [Updates](#updates)). Managed launches (login startup, `--config`) skip setup.
+There is no `/Applications` shortcut. The app copies itself with its quarantine and extended attributes preserved; everything else is as described above. Managed launches (login startup, `--config`) skip setup.
 
 ### Source install (advanced / development)
 
@@ -91,7 +101,7 @@ The file is `~/Library/Application Support/omp-usage-panel/config.json`; editing
 | `warnPercent` / `criticalPercent` | `70` / `90` | Thresholds |
 | `showPace` | `true` | Show the elapsed-period marker |
 
-`ompPath` must be absolute. `nodePath` is kept only for compatibility with earlier versions and must still be an absolute path, but it is no longer edited in Settings and the app never runs it: collection, setup and updates always use the bundled Node.js. Its directory is still placed first on the `PATH` given to omp, so an omp wrapper that runs `env node` resolves the same Node.js as before (new installs point it at the bundled runtime). `profile` (default `default`) names the omp profile that holds authentication. Metric limit IDs are at `snapshot.accounts[].limits[].id` in collector output. Choosing a metric changes only the display, not omp's account selection.
+`ompPath` must be absolute. `nodePath` is a legacy field that must still be an absolute path, but it is not edited in Settings and the app never runs it: collection, setup and updates always use the bundled Node.js. Its directory is still placed first on the `PATH` given to omp, so an omp wrapper that runs `env node` resolves the Node.js it points at (installs point it at the bundled runtime). `profile` (default `default`) names the omp profile that holds authentication. Metric limit IDs are at `snapshot.accounts[].limits[].id` in collector output. Choosing a metric changes only the display, not omp's account selection.
 
 ## Collector
 
@@ -104,7 +114,7 @@ node packages/usage-core/cli.mjs --refresh  # runs `omp usage invalidate` first
 
 ## Updates
 
-After installation, the app checks GitHub for new versions. Updates are prebuilt universal (arm64 + x86_64) apps downloaded from [GitHub Releases](https://github.com/dhkimxx/omp-usage-panel/releases); no Xcode or source build is needed for them. Node.js is bundled; only omp is still required. The first update from 1.0.x to a version with the bundled Node.js is still carried out by the installed 1.0.x app, which needs the Node.js in its `config.json` until the update finishes; after that the path is not used again.
+After installation, the app checks GitHub for new versions. Updates are prebuilt universal (arm64 + x86_64) apps downloaded from [GitHub Releases](https://github.com/dhkimxx/omp-usage-panel/releases); no Xcode or source build is needed for them, and Node.js is bundled (only omp is still required). Updates are fetched by the app itself, so they are never quarantined.
 
 - **Defaults:** daily checks on, notifications on, automatic installation **off**.
 - **Settings → Updates** (app-wide, not per omp profile) holds these controls and uses the same **Save & Apply** / **Cancel** as the rest of Settings. **Check for Updates…** in the menu runs a manual check, which ignores Skip and turned-off notifications.

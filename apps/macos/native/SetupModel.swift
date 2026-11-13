@@ -13,6 +13,8 @@ enum SetupLaunchRoute: Equatable {
     case managedHandoff
     /// No arguments from any other location (DMG, Downloads, an uncanonical copy): one-time setup.
     case setup
+    /// `--install [--omp /absolute/path] [--profile name]`: the headless install transaction, no UI at all.
+    case install(omp: String?, profile: String?)
     case usage
 }
 
@@ -25,9 +27,34 @@ enum SetupLaunch {
     /// `resolve` canonicalizes a path (symlinks, `..`); an unresolvable path must come back standardized, not nil.
     static func route(arguments: [String], bundlePath: String, home: String, resolve: (String) -> String) -> SetupLaunchRoute {
         if arguments.count == 3 && arguments[1] == "--config" { return .normal(configPath: arguments[2]) }
+        if arguments.count >= 2 && arguments[1] == "--install" { return installRoute(Array(arguments.dropFirst(2))) }
         guard arguments.count == 1 else { return .usage }
         let canonical = resolve(canonicalAppPath(home: home))
         return resolve(bundlePath) == canonical ? .managedHandoff : .setup
+    }
+
+    static let usageText = "Usage: OMPUsagePanel [--config path] | --install [--omp /absolute/path] [--profile name]"
+
+    /// Options after `--install`: `--omp` (absolute) and `--profile` (not blank, not another option), each at most
+    /// once in any order, every value required. Anything else is a usage error.
+    private static func installRoute(_ options: [String]) -> SetupLaunchRoute {
+        var omp: String?, profile: String?
+        var index = 0
+        while index < options.count {
+            guard index + 1 < options.count else { return .usage }
+            let value = options[index + 1]
+            switch options[index] {
+            case "--omp":
+                guard omp == nil, value.hasPrefix("/") else { return .usage }
+                omp = value
+            case "--profile":
+                guard profile == nil, !PanelConfig.isBlank(value), !value.hasPrefix("--") else { return .usage }
+                profile = value
+            default: return .usage
+            }
+            index += 2
+        }
+        return .install(omp: omp, profile: profile)
     }
 
     static func resolvingSymlinks(_ path: String) -> String {
@@ -321,6 +348,107 @@ struct SetupDraft: Equatable {
         case .refusedConfig: return refusalMessage ?? "The existing configuration cannot be used."
         case .omp(let issue): return "omp: " + issue.message(subject: "omp")
         case .profile: return "Enter a profile name."
+        }
+    }
+}
+
+// MARK: - Headless install (`--install`)
+
+/// What the headless installer prints and returns. `stdout`/`stderr` are single controlled lines (no trailing newline).
+struct SetupInstallReport: Equatable {
+    let exitCode: Int32
+    let stdout: String?
+    let stderr: String?
+
+    static func failed(_ message: String, exitCode: Int32) -> SetupInstallReport {
+        let line = message.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return SetupInstallReport(exitCode: exitCode, stdout: nil, stderr: "OMP Usage install failed: " + line)
+    }
+}
+
+enum SetupInstallPlan: Equatable {
+    /// Run the helper's install. `ompPath` only seeds the child environment; `notes` are stderr lines printed first.
+    case run(request: SetupRequest, ompPath: String, notes: [String])
+    /// Nothing is run: print the report and exit.
+    case stop(SetupInstallReport)
+}
+
+enum SetupInstallCLI {
+    static let ompNotFound = "omp not found; pass --omp /absolute/path"
+    static let ignoredNote = "OMP Usage install note: OMP Usage is already set up; --omp and --profile were ignored and the existing configuration was kept."
+
+    /// The same request rules as the Setup window (`SetupDraft` decides): a valid existing configuration is read-only and
+    /// authoritative, an invalid one is refused, otherwise omp is `--omp`, else the first usable discovered one.
+    static func plan(omp: String?, profile: String?, existing: SetupExistingConfig, discovery: SetupDiscoveryEnvironment,
+                     sourceAppPath: String, hostPid: Int) -> SetupInstallPlan {
+        let suggested: String
+        switch existing {
+        case .refused(let message):
+            return .stop(.failed(message + " Setup will not replace or reset this file. Fix or move it, then run the installer again.", exitCode: 1))
+        case .valid: suggested = ""
+        case .none:
+            suggested = omp ?? SetupDiscovery.ompCandidates(discovery).first ?? ""
+            if suggested.isEmpty { return .stop(.failed(ompNotFound, exitCode: 2)) }
+        }
+        var draft = SetupDraft(existing: existing, suggestedOmp: suggested)
+        if let profile { draft.setProfile(profile) }
+        if let blocker = draft.blocker(kind: discovery.kind) { return .stop(.failed(draft.blockerMessage(blocker), exitCode: 2)) }
+        guard let request = draft.request(sourceAppPath: sourceAppPath, hostPid: hostPid, kind: discovery.kind) else {
+            return .stop(.failed("The install request could not be prepared.", exitCode: 1))
+        }
+        let notes = draft.isReadOnly && (omp != nil || profile != nil) ? [ignoredNote] : []
+        return .run(request: request, ompPath: draft.ompPath, notes: notes)
+    }
+
+    /// Success is one stdout line with the installed app path. A `continue` action never happens for an install and is
+    /// treated like any unconfirmed result.
+    static func report(for result: Result<SetupSuccess, SetupFailure>) -> SetupInstallReport {
+        switch result {
+        case .success(let success) where success.action != .continue:
+            return SetupInstallReport(exitCode: 0, stdout: "OMP Usage installed: " + success.appPath, stderr: nil)
+        case .success: return report(for: .failure(SetupFailure(code: "invalid-response")))
+        case .failure(let failure):
+            return .failed(message(for: failure), exitCode: ["omp-unavailable", "invalid-profile"].contains(failure.code) ? 2 : 1)
+        }
+    }
+
+    /// Controlled one-sentence text per failure code. Helper-supplied text is never shown.
+    static func message(for failure: SetupFailure) -> String {
+        switch failure.code {
+        case "running":
+            return "OMP Usage is running; quit it (menu bar panel -> Options -> Quit) and run the installer again."
+        case "update-in-progress", "transaction":
+            return "An OMP Usage update is in progress or waiting to be confirmed. Open the installed OMP Usage app from Applications so it can finish and confirm the update, then run the installer again."
+        case "ownership-mismatch":
+            return "An existing update belongs to a different installation location. Nothing was changed. Finish or recover that installation first."
+        case "busy":
+            return "Another OMP Usage install or update is busy. Wait a moment, then run the installer again."
+        case "node-unavailable":
+            return failure.detail ?? "The bundled Node.js runtime could not be prepared or started. Download OMP Usage again, then run the installer again."
+        case "omp-unavailable":
+            return "The omp executable could not be used. Pass a valid one with --omp /absolute/path."
+        case "invalid-profile":
+            return "The profile name is not valid. Pass a different one with --profile."
+        case "config-invalid", "config-changed":
+            return "The existing configuration is invalid or changed during setup. It was not reset or replaced. Fix or move that file, then run the installer again."
+        case "not-managed":
+            return "This copy is not registered as the managed OMP Usage."
+        case "foreign-app", "foreign-agent", "foreign-job", "foreign-state":
+            return "A different app, login item or job already occupies the OMP Usage location, so the installer will not overwrite it. Review it yourself; the installer never replaces files it does not own."
+        case "source-mismatch", "invalid-source":
+            return "This copy of OMP Usage is not intact. Run the one-line installer again to download it afresh."
+        case "invalid-request", "invalid-response", "missing-helper":
+            return "The installer did not return a confirmed result, so it cannot tell whether anything was installed. Check ~/Applications/OMP Usage.app and the login item before trying again. Existing files are left as they are."
+        case "rollback-incomplete", "state-unsafe", "manifest-invalid":
+            return "The installer stopped because the existing installation record or its permissions are not in a safe state. Keep the installed app and any backup files as they are and seek repair. Do not force an overwrite or clean up by hand."
+        case "copy-failed", "install-failed", "io-error":
+            return "The installer could not copy or register the app. Check free disk space and permissions on your home folder, then run it again."
+        case "unsupported":
+            return "This macOS setup is not supported on this system."
+        case "timeout":
+            return "The installer took too long and was stopped. Run it again."
+        default:
+            return "The installer could not complete (\(failure.code)). Fix the problem and run it again."
         }
     }
 }

@@ -60,10 +60,10 @@ export function writeFixtureNodeResources(app, pin = fixtureNodePin) {
 }
 
 /**
- * Universal (arm64 + x86_64), ad-hoc deep-signed app. `bundledNode: false` builds an app like the releases published before Node was bundled.
- * @param {string} directory @param {{version?: string, universal?: boolean, bundledNode?: boolean}} [options]
+ * Universal (arm64 + x86_64), ad-hoc deep-signed app that always carries the fixture bundled Node resources.
+ * @param {string} directory @param {{version?: string, universal?: boolean}} [options]
  */
-export function buildFixtureApp(directory, { version = '1.0.0', universal = true, bundledNode = true } = {}) {
+export function buildFixtureApp(directory, { version = '1.0.0', universal = true } = {}) {
   const root = path.join(directory, `app-${version}-${universal}`), app = path.join(root, dmgAppName)
   mkdirSync(path.join(app, 'Contents/MacOS'), { recursive: true })
   writeFileSync(path.join(app, 'Contents/Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>OMPUsagePanel</string><key>CFBundleIdentifier</key><string>com.example.omp-usage-fixture</string><key>CFBundleName</key><string>OMP Usage</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${version}</string><key>CFBundleVersion</key><string>${version}</string></dict></plist>\n`)
@@ -72,7 +72,7 @@ export function buildFixtureApp(directory, { version = '1.0.0', universal = true
   execFileSync('/usr/bin/xcrun', ['clang', ...(universal ? ['-arch', 'arm64', '-arch', 'x86_64'] : ['-arch', process.arch === 'arm64' ? 'arm64' : 'x86_64']), '-o', path.join(app, 'Contents/MacOS/OMPUsagePanel'), source], { stdio: 'pipe' })
   rmSync(source)
   mkdirSync(path.join(app, 'Contents/Resources')); writeFileSync(path.join(app, 'Contents/Resources/data.txt'), 'resource')
-  if (bundledNode) writeFixtureNodeResources(app)
+  writeFixtureNodeResources(app)
   execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'pipe' })
   return app
 }

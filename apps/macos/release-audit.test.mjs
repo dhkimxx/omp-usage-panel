@@ -5,10 +5,10 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { dmgAppName, dmgNote, dmgNoteName, legacyDmgNote } from './dmg.mjs'
+import { dmgAppName, dmgNote, dmgNoteName } from './dmg.mjs'
 import { appTreeHash } from './ownership.mjs'
-import { archiveName, createPreparedPackage, downloadURL, emptyFeed, feedItems, inspectArchive, prepareArchive } from './release.mjs'
-import { fixtureNodePin, writeFixtureNodeResources } from './release-fixtures.mjs'
+import { archiveName, createPreparedPackage, downloadURL, emptyFeed, feedItems } from './release.mjs'
+import { buildFixtureApp, fixtureNodePin } from './release-fixtures.mjs'
 import { assertCommitted, auditFeed, feedEntries, githubClient } from './release-audit.mjs'
 import { channelPath, parseChannel } from './sparkle.mjs'
 
@@ -37,20 +37,6 @@ const unsigned = feed => feed.slice(0, feed.lastIndexOf('<!-- sparkle-signatures
 /** @param {string} body @param {import('node:crypto').KeyObject} [key] */
 const resigned = (body, key = privateKey) => signText(key, body)
 
-/** @param {string} directory @param {string} version @param {boolean} bundledNode */
-function buildFixtureApp(directory, version, bundledNode) {
-  const root = path.join(directory, `app-${version}`), app = path.join(root, dmgAppName)
-  mkdirSync(path.join(app, 'Contents/MacOS'), { recursive: true })
-  writeFileSync(path.join(app, 'Contents/Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>OMPUsagePanel</string><key>CFBundleIdentifier</key><string>com.example.omp-usage-fixture</string><key>CFBundleName</key><string>OMP Usage</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${version}</string><key>CFBundleVersion</key><string>${version}</string></dict></plist>\n`)
-  const source = path.join(root, 'main.c')
-  writeFileSync(source, 'int main(void) { return 0; }\n')
-  execFileSync('/usr/bin/xcrun', ['clang', '-arch', 'arm64', '-arch', 'x86_64', '-o', path.join(app, 'Contents/MacOS/OMPUsagePanel'), source], { stdio: 'pipe' })
-  rmSync(source)
-  if (bundledNode) { mkdirSync(path.join(app, 'Contents/Resources')); writeFixtureNodeResources(app) }
-  execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'pipe' })
-  return app
-}
-
 /** @typedef {{version: string, tag: string, url: string, sourceCommit: string, bytes: Buffer, sha256: string, app: string}} Built */
 /** @type {{directory: string, feed: string, builds: Built[]}} */
 let world
@@ -60,18 +46,10 @@ before(() => {
   /** @type {Built[]} */
   const builds = []
   let feed = emptyFeed()
-  // 1.0.0 mirrors a release published before Node was bundled (no node resources, the legacy install note); 1.1.0 is a newly built package.
   for (const version of /** @type {const} */ (['1.0.0', '1.1.0'])) {
-    const legacy = version === '1.0.0', app = buildFixtureApp(directory, version, !legacy), stage = path.join(directory, `package-${version}`)
+    const app = buildFixtureApp(directory, { version }), stage = path.join(directory, `package-${version}`)
     mkdirSync(stage)
-    if (legacy) {
-      const payload = mkdtempSync(path.join(directory, 'legacy-payload-')), archive = path.join(stage, archiveName(version))
-      execFileSync('/usr/bin/ditto', [app, path.join(payload, dmgAppName)]); writeFileSync(path.join(payload, dmgNoteName), legacyDmgNote)
-      execFileSync('/usr/bin/hdiutil', ['create', '-quiet', '-srcfolder', payload, '-volname', 'OMP Usage', '-fs', 'HFS+', '-format', 'UDZO', archive])
-      prepareArchive({ archive, version, notes: `OMP Usage ${version}`, sourceCommit: commits[version], currentFeed: feed, inspect: file => inspectArchive({ file, version, appTreeHash }), signer: signerFor(privateKey), pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000' })
-    } else {
-      createPreparedPackage({ app, stage, version, notes: `OMP Usage ${version}`, sourceCommit: commits[version], currentFeed: feed, appTreeHash, signer: signerFor(privateKey), pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000', nodePin: fixtureNodePin })
-    }
+    createPreparedPackage({ app, stage, version, notes: `OMP Usage ${version}`, sourceCommit: commits[version], currentFeed: feed, appTreeHash, signer: signerFor(privateKey), pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000', nodePin: fixtureNodePin })
     feed = readFileSync(path.join(stage, 'appcast.xml'), 'utf8')
     const bytes = readFileSync(path.join(stage, archiveName(version)))
     builds.push({ version, tag: `v${version}`, url: downloadURL(version), sourceCommit: commits[version], bytes, sha256: createHash('sha256').update(bytes).digest('hex'), app })
@@ -294,7 +272,7 @@ test('a correctly signed feed item whose image or tree hash is wrong is still re
   assert.equal(entryFor(report, '1.0.0').ok, true, 'the untouched version still verifies')
 })
 
-test('a published release whose bundled Node archive differs from its manifest is refused, while the release without node resources passes', darwin, () => {
+test('a published release whose bundled Node archive differs from its manifest is refused', darwin, () => {
   const build = /** @type {Built} */ (world.builds[1]), body = unsigned(world.feed)
   const directory = mkdtempSync(path.join(world.directory, 'forged-node-')), stage = path.join(directory, 'stage'), dmg = path.join(directory, archiveName(build.version))
   mkdirSync(stage)
@@ -309,14 +287,16 @@ test('a published release whose bundled Node archive differs from its manifest i
   const net = network({ releases: { 'v1.1.0': { ...releaseJson(build), assets: [{ ...releaseJson(build).assets[0], size: length, digest: null }] } }, files: { [build.url]: readFileSync(dmg) } })
   const report = audit(net, forgedFeed), failed = entryFor(report, '1.1.0')
   assert.equal(failed.ok, false); assert.equal(failed.stage, 'asset'); assert.match(failed.error, /archive differs from its manifest/)
-  assert.equal(entryFor(report, '1.0.0').ok, true, 'the release built before Node was bundled still verifies')
+  assert.equal(entryFor(report, '1.0.0').ok, true, 'the untouched version still verifies')
 })
 
-test('a release of the first bundled version or later without node resources is refused, even when its signature and layout are fine', darwin, () => {
+test('a published release without node resources is refused, even when its signature and layout are fine', darwin, () => {
   const build = /** @type {Built} */ (world.builds[1]), body = unsigned(world.feed)
   const directory = mkdtempSync(path.join(world.directory, 'forged-nonode-')), stage = path.join(directory, 'stage'), dmg = path.join(directory, archiveName(build.version))
   mkdirSync(stage)
-  execFileSync('/usr/bin/ditto', [buildFixtureApp(directory, build.version, false), path.join(stage, dmgAppName)])
+  const app = path.join(stage, dmgAppName)
+  execFileSync('/usr/bin/ditto', [build.app, app]); rmSync(path.join(app, 'Contents/Resources/node'), { recursive: true })
+  execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'pipe' })
   writeFileSync(path.join(stage, dmgNoteName), dmgNote)
   execFileSync('/usr/bin/hdiutil', ['create', '-quiet', '-srcfolder', stage, '-volname', 'OMP Usage', '-fs', 'HFS+', '-format', 'UDZO', dmg])
   const { signature, length } = signerFor(privateKey).signArchive(dmg)
@@ -324,7 +304,7 @@ test('a release of the first bundled version or later without node resources is 
   const net = network({ releases: { 'v1.1.0': { ...releaseJson(build), assets: [{ ...releaseJson(build).assets[0], size: length, digest: null }] } }, files: { [build.url]: readFileSync(dmg) } })
   const report = audit(net, forgedFeed), failed = entryFor(report, '1.1.0')
   assert.equal(failed.ok, false); assert.equal(failed.stage, 'asset'); assert.match(failed.error, /no bundled Node runtime/)
-  assert.equal(entryFor(report, '1.0.0').ok, true, '1.0.x releases have no node resources and still pass')
+  assert.equal(entryFor(report, '1.0.0').ok, true, 'the untouched version still verifies')
 })
 
 test('the GitHub client resolves the tag object chain on the canonical repository and refuses anything that is not a commit', () => {

@@ -6,7 +6,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { buildApp as buildWorkingApp } from './build.mjs'
 import { DmgCleanupError, createDmg, withDmgApp } from './dmg.mjs'
-import { channelPath, defaults, ensureSparkleSdk, feedPath, hasBundledNode, readChannel, rootVersion, sourceRoot, verifyNodeResources } from './sparkle.mjs'
+import { channelPath, defaults, ensureSparkleSdk, feedPath, readChannel, rootVersion, sourceRoot, verifyNodeResources } from './sparkle.mjs'
 
 const usage = `Usage:
   node apps/macos/release.mjs setup [--public-key base64]
@@ -224,7 +224,7 @@ export function prepareArchive({ archive, version, notes, sourceCommit, currentF
  */
 export function createPreparedPackage({ app, stage, version, notes, sourceCommit, currentFeed, appTreeHash, signer, pubDate = rfc822(new Date()), nodePin }) {
   verifyUniversal(app)
-  verifyNodeResources(app, { required: true, pin: nodePin })
+  verifyNodeResources(app, { matchPin: true, pin: nodePin })
   const archive = path.join(stage, archiveName(version))
   createDmg({ app, output: archive })
   prepareArchive({ archive, version, notes, sourceCommit, currentFeed, inspect: file => verifyArchive(file, app, appTreeHash, nodePin), signer, pubDate })
@@ -248,7 +248,7 @@ export function prepareFromCandidate({ candidate, stage, version, notes, current
   return prepareArchive({
     archive, version, notes, sourceCommit: candidate.manifest.sourceCommit, currentFeed, signer, pubDate,
     expectedSHA256: candidate.sha256, ci: candidate.provenance,
-    inspect: file => inspectArchive({ file, version, appTreeHash, expectedAppTreeSHA256: candidate.manifest.appTreeSHA256, expectedFrom: 'the CI candidate manifest', requireBundledNode: true, nodePin }),
+    inspect: file => inspectArchive({ file, version, appTreeHash, expectedAppTreeSHA256: candidate.manifest.appTreeSHA256, expectedFrom: 'the CI candidate manifest', matchPin: true, nodePin }),
   })
 }
 
@@ -314,7 +314,7 @@ function verifyUniversal(app) {
 function verifyArchive(archive, builtApp, appTreeHash, nodePin) {
   return withDmgApp(archive, mounted => {
     verifyUniversal(mounted)
-    verifyNodeResources(mounted, { required: true, pin: nodePin })
+    verifyNodeResources(mounted, { matchPin: true, pin: nodePin })
     const hash = appTreeHash(mounted)
     if (hash !== appTreeHash(builtApp)) throw new Error('DMG mount changed the app tree')
     return hash
@@ -326,17 +326,16 @@ function verifyArchive(archive, builtApp, appTreeHash, nodePin) {
  * version equal to `version`. Returns the app tree hash, which must equal `expectedAppTreeSHA256` when one is given
  * (`expectedFrom` names where that value came from, for the refusal message).
  * `hdiutil` replaces the system tool used to attach the image (the default is `/usr/bin/hdiutil`).
- * The bundled Node resources are always checked for structure and self-consistency (never against the current pin, so published releases keep
- * verifying after the pin moves), and are required for every version from `firstBundledNodeVersion` on. `requireBundledNode` (newly built apps
- * and CI candidates) additionally requires them whatever the version and compares them, including the `node` bytes, with the committed pin
- * (`nodePin` replaces it in tests).
- * @param {{file: string, version: string, appTreeHash: TreeHash, expectedAppTreeSHA256?: string|undefined, expectedFrom?: string, hdiutil?: Hdiutil | undefined, requireBundledNode?: boolean, nodePin?: NodePin|undefined}} options
+ * The bundled Node resources are always required and checked for structure and self-consistency. By default they are never compared with the
+ * current pin, so published releases keep verifying after the pin moves; `matchPin` (newly built apps and CI candidates) additionally compares
+ * them, including the `node` bytes, with the committed pin (`nodePin` replaces it in tests).
+ * @param {{file: string, version: string, appTreeHash: TreeHash, expectedAppTreeSHA256?: string|undefined, expectedFrom?: string, hdiutil?: Hdiutil | undefined, matchPin?: boolean, nodePin?: NodePin|undefined}} options
  * @returns {string}
  */
-export function inspectArchive({ file, version, appTreeHash, expectedAppTreeSHA256, expectedFrom = 'the signed feed', hdiutil, requireBundledNode = false, nodePin }) {
+export function inspectArchive({ file, version, appTreeHash, expectedAppTreeSHA256, expectedFrom = 'the signed feed', hdiutil, matchPin = false, nodePin }) {
   return withDmgApp(file, extracted => {
     verifyUniversal(extracted)
-    verifyNodeResources(extracted, { required: requireBundledNode || hasBundledNode(version), matchPin: requireBundledNode, pin: nodePin })
+    verifyNodeResources(extracted, { matchPin, pin: nodePin })
     const info = run('/usr/bin/plutil', ['-extract', 'CFBundleShortVersionString', 'raw', '-o', '-', path.join(extracted, 'Contents/Info.plist')]).trim()
     if (info !== version) throw new Error(`Archive app version ${info} differs from ${version}`)
     const hash = appTreeHash(extracted)
@@ -383,7 +382,7 @@ export function verifyPrepared({ output, version, notes, publicEDKey, currentFee
   if (parsed.url !== downloadURL(version)) throw new Error('Candidate feed enclosure URL is not the release asset URL')
   if (parsed.notes !== notes) throw new Error('Candidate feed notes differ from the supplied notes')
   const archive = path.join(output, archiveName(version))
-  return { archive, url: parsed.url, sha256: verifyReleaseAsset({ file: archive, item: parsed, version, publicEDKey, appTreeHash, requireBundledNode: true, nodePin }) }
+  return { archive, url: parsed.url, sha256: verifyReleaseAsset({ file: archive, item: parsed, version, publicEDKey, appTreeHash, matchPin: true, nodePin }) }
 }
 
 /**
@@ -391,13 +390,13 @@ export function verifyPrepared({ output, version, notes, publicEDKey, currentFee
  * image is ever mounted), then a read-only mount that must hold exactly the app and install note, a universal deep-signed app of
  * the expected version, and the signed trusted tree hash. Returns the asset SHA-256.
  * `hdiutil` replaces the system tool used to attach the image (the default is `/usr/bin/hdiutil`).
- * @param {{file: string, item: ReturnType<typeof parseItem>, version: string, publicEDKey: string, appTreeHash: TreeHash, hdiutil?: Hdiutil | undefined, requireBundledNode?: boolean, nodePin?: NodePin|undefined}} options
+ * @param {{file: string, item: ReturnType<typeof parseItem>, version: string, publicEDKey: string, appTreeHash: TreeHash, hdiutil?: Hdiutil | undefined, matchPin?: boolean, nodePin?: NodePin|undefined}} options
  */
-export function verifyReleaseAsset({ file, item, version, publicEDKey, appTreeHash, hdiutil, requireBundledNode = false, nodePin }) {
+export function verifyReleaseAsset({ file, item, version, publicEDKey, appTreeHash, hdiutil, matchPin = false, nodePin }) {
   const data = readFileSync(file)
   if (data.length !== item.length) throw new Error('Archive length differs from the signed feed')
   if (!verifySignature(data, item.signature, publicEDKey)) throw new Error('Archive signature does not verify against the pinned public key')
-  inspectArchive({ file, version, appTreeHash, expectedAppTreeSHA256: item.appTreeSHA256, hdiutil, requireBundledNode, nodePin })
+  inspectArchive({ file, version, appTreeHash, expectedAppTreeSHA256: item.appTreeSHA256, hdiutil, matchPin, nodePin })
   return createHash('sha256').update(data).digest('hex')
 }
 

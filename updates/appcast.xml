@@ -5,80 +5,9 @@
     <link>https://github.com/dhkimxx/omp-usage-panel</link>
     <description>Signed OMP Usage application updates</description>
     <language>en</language>
-    <item>
-      <title>OMP Usage 1.0.0</title>
-      <pubDate>Thu, 12 Nov 2026 10:15:38 +0000</pubDate>
-      <sparkle:version>1.0.0</sparkle:version>
-      <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-      <omp:appTreeSHA256>980af50ed9157d5e2b1f8ec6f70b8474e1d535ba9ce39d49ec19845d33b1e884</omp:appTreeSHA256>
-      <omp:sourceCommit>e6d4095b68aefe993277f61eac6790e4bba310fa</omp:sourceCommit>
-      <description sparkle:descriptionFormat="plain-text"><![CDATA[# OMP Usage 1.0.0
-
-- Distributed as a single DMG containing `OMP Usage.app` and a short `Install.txt`.
-- First launch opens a native setup window. It detects an existing Node.js 22.18+ and omp (including nvm), lets you edit or browse for their absolute paths, edit the omp profile (an existing default config is detected automatically), and installs on **Install & Open**. Clicking Install also registers a per-user login LaunchAgent.
-- The app copies itself without admin rights to `~/Applications/OMP Usage.app`, preserving quarantine and extended attributes, and relaunches from there. There is no `/Applications` link.
-- Node.js and omp are not bundled or installed; Setup does not read, copy or change omp credentials or plugins. An existing valid configuration is kept byte-identical; an invalid one is reported, not reset.
-- Existing users update through the in-app updater using the same feed, key and bundle identity; settings and preferences are preserved.
-- Not Developer ID signed or notarized (ad-hoc/Ed25519 signed). Gatekeeper may block the first downloaded copy before the app runs.]]></description>
-      <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v1.0.0/OMP-Usage-1.0.0.dmg" length="2594962" type="application/octet-stream" sparkle:edSignature="JXXFYZMnM3vYnBrCecXLFOj6mxcmIzJqHzmByXkA/h3I1KF0VxbLpeb8qrkQp2PCcoq9M1qdpXuLgYErgOY+Bg==" />
-    </item>
-    <item>
-      <title>OMP Usage 1.0.1</title>
-      <pubDate>Thu, 12 Nov 2026 13:50:21 +0000</pubDate>
-      <sparkle:version>1.0.1</sparkle:version>
-      <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-      <omp:appTreeSHA256>c705e191510f5aea9ddfd38d3bcc045195290b671552d131555058961c04dfdd</omp:appTreeSHA256>
-      <omp:sourceCommit>55979b16d9e829f415a3033543cd5570e1bf19a7</omp:sourceCommit>
-      <description sparkle:descriptionFormat="plain-text"><![CDATA[## Fixes
-
-- Removed providers no longer leave placeholder rings in the compact panel. Open provider details are reconciled when a successful usage result no longer reports the provider.
-- Keep saved provider selection and left/right placement for reconnection. Failed refreshes and older cached results no longer resurrect a confirmed removal.
-- Removal follows normal collection/cache timing; use Refresh to bypass the cache immediately. omp credentials and provider plugins are never modified.
-
-## Release automation
-
-- Build and test universal macOS DMGs on GitHub-hosted runners with verifiable build-provenance attestations.
-- Authenticate the exact CI-built bytes before local update signing; the signing key stays in the maintainer's Keychain.
-- Add scheduled public-release integrity checks and fix the CI packaging CLI's module-import cycle.
-
-## Install or update
-
-Existing users: choose Check for Updates and install 1.0.1. Configuration, display preferences and update choices are preserved.
-
-New users: open the DMG, launch OMP Usage.app and choose Install & Open. Requires macOS 13+, Node.js 22.18+ and an authenticated omp with JSON usage support. The app is ad-hoc code-signed and not Apple-notarized.]]></description>
-      <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v1.0.1/OMP-Usage-1.0.1.dmg" length="3703616" type="application/octet-stream" sparkle:edSignature="I3LaL4UZLr2ROdkEN8KBhxy6o0omxC4UqsTUs2VWkUPPSBsGjQl/yI+GKT6GLA+ImedUbfI787bZzhXYEcJ/Cg==" />
-    </item>
-    <item>
-      <title>OMP Usage 1.1.0</title>
-      <pubDate>Fri, 13 Nov 2026 02:22:04 +0000</pubDate>
-      <sparkle:version>1.1.0</sparkle:version>
-      <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-      <omp:appTreeSHA256>deeb9e89d9a7049425a8fc0254cec325ed20c4c9258d8334f76326a8d6608e94</omp:appTreeSHA256>
-      <omp:sourceCommit>9dc31cc4669f9fe964c5eaa2cc4015761de72b41</omp:sourceCommit>
-      <description sparkle:descriptionFormat="plain-text"><![CDATA[## Node.js is now bundled
-
-- OMP Usage no longer needs a Node.js installation. It ships a pinned official Node.js 22.23.5 and runs the collector, setup and updater from it, so your own Node.js version (or an `nvm uninstall`) can no longer break collection.
-- On first start the app unpacks the runtime for your Mac's architecture into `~/Library/Application Support/omp-usage-panel/runtime/` (about 113 MB, excluded from backups). It is checked against pinned SHA-256 values and Node.js's Developer ID signature before it is ever run, and it is never run from inside the app bundle.
-- Setup and Settings no longer ask for a Node path. Existing configurations are kept byte for byte; the old `nodePath` is only used to pick the first `PATH` directory for omp.
-- The download is about 49 MB larger because it carries the Node.js runtime for both Apple Silicon and Intel.
-
-## Release automation
-
-- Releases from 1.1.0 on must carry valid Node.js resources; older releases keep verifying, and audits do not break when the pinned Node.js version changes.
-
-## Install or update
-
-Existing users: choose Check for Updates and install 1.1.0. This first update is still carried out by your installed version, so the Node.js it was configured with must still exist until the update finishes. After that, no Node.js is needed.
-
-New users: open the DMG, launch OMP Usage.app and choose Install & Open. Requires macOS 13+ and an authenticated omp with JSON usage support. The app is ad-hoc code-signed and not Apple-notarized.]]></description>
-      <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v1.1.0/OMP-Usage-1.1.0.dmg" length="53065778" type="application/octet-stream" sparkle:edSignature="y1A4TrghlLQbzeXspEBfIQZPYWgQc3c6mntaffCgyCUS+88Kcgwu5BytOg1qKWrMsFRIPzJbV1g44hrqTTI6Ag==" />
-    </item>
   </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: LXJOJGYu5+1RXyA8vD1caheGUMdGwT8abQcTEDqxV4cGQ8223JpceayZEO6rGC+lddfsZnYYb95ao4JP7qBzCA==
-length: 6808
+edSignature: 02RL/m4JW/RbpKDW1egirrO7Q/NQFoPGlIjLIbq6MQ/e6wKOjCYsMwtfb+WHztqqHAuxL61UCUUYwq5D1gCwBQ==
+length: 407
 -->

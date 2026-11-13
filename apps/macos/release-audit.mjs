@@ -10,7 +10,7 @@ import { channelPath, defaults, feedPath, parseChannel, sourceRoot } from './spa
 // Keyless, read-only audit of what is publicly released. It needs neither the Ed25519 private key nor the Sparkle SDK and never runs the app:
 // the committed signed feed is authenticated with the pinned public key, and every item must be backed by a real stable GitHub release
 // whose tag points at the signed source commit and whose single DMG verifies (signature before mount, layout, universal deep signature,
-// version, tree hash, and the bundled Node resources when the release has them; releases built before the runtime was bundled have none) through the same exported verifier the publisher uses.
+// version, tree hash, and the bundled Node resources, which every release must carry) through the same exported verifier the publisher uses.
 const usage = 'Usage: node apps/macos/release-audit.mjs   (audits the committed updates/appcast.xml; takes no options)'
 /** What a passing report does and does not establish; printed with every report. */
 export const auditScope = 'Audits the COMMITTED signed feed (updates/appcast.xml at the reported commit) against public GitHub releases, tags and assets. ' +

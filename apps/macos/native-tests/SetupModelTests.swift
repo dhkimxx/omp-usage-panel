@@ -22,6 +22,10 @@ func runSetupModelTests() {
     precondition(SetupLaunch.route(arguments: ["x", "--other", "y"], bundlePath: canonical, home: "/Users/me", resolve: resolve) == .usage)
     precondition(SetupLaunch.defaultConfigPath(home: "/Users/me") == "/Users/me/Library/Application Support/omp-usage-panel/config.json")
 
+    runSetupInstallRouteTests(resolve: resolve, canonical: canonical)
+    runSetupInstallPlanTests()
+    runSetupInstallReportTests()
+
 
     // Path checks: files only, executable, absolute; folders and plain files are refused with distinct reasons.
     let kinds: [String: SetupFileKind] = ["/bin/node": .file(executable: true), "/etc/plain": .file(executable: false), "/opt": .directory]
@@ -70,6 +74,102 @@ func runSetupModelTests() {
     precondition(environment == ["PATH": "/n:/o:/bin", "HOME": "/h", "KEEP": "1"])
 }
 
+
+private func runSetupInstallRouteTests(resolve: @escaping (String) -> String, canonical: String) {
+    func route(_ options: [String]) -> SetupLaunchRoute {
+        SetupLaunch.route(arguments: ["x"] + options, bundlePath: canonical, home: "/Users/me", resolve: resolve)
+    }
+    precondition(route(["--install"]) == .install(omp: nil, profile: nil))
+    precondition(route(["--install", "--omp", "/o/omp"]) == .install(omp: "/o/omp", profile: nil))
+    precondition(route(["--install", "--profile", "work"]) == .install(omp: nil, profile: "work"))
+    precondition(route(["--install", "--omp", "/o/omp", "--profile", "work"]) == .install(omp: "/o/omp", profile: "work"))
+    precondition(route(["--install", "--profile", "work", "--omp", "/o/omp"]) == .install(omp: "/o/omp", profile: "work"), "any order")
+    precondition(route(["--install", "--omp", "/My Tools/omp"]) == .install(omp: "/My Tools/omp", profile: nil), "values are verbatim")
+    // Invalid grammars are all usage errors.
+    let invalid: [[String]] = [
+        ["--install", "--omp", "/a", "--omp", "/b"], ["--install", "--profile", "a", "--profile", "b"],
+        ["--install", "--omp", "relative/omp"], ["--install", "--omp", ""], ["--install", "--omp"], ["--install", "--profile"],
+        ["--install", "--profile", ""], ["--install", "--profile", "  "], ["--install", "--profile", "--omp", "/o"],
+        ["--install", "--omp", "/o", "--profile"], ["--install", "extra"], ["--install", "--other", "x"],
+        ["--install", "--omp", "/o", "extra"], ["--omp", "/o", "--install"], ["--install", "--config", "/c.json"],
+        ["--config", "/c.json", "--install"], ["--config", "/c.json", "--omp", "/o"]
+    ]
+    for arguments in invalid { precondition(route(arguments) == .usage, "must be usage: \(arguments)") }
+    precondition(SetupLaunch.usageText == "Usage: OMPUsagePanel [--config path] | --install [--omp /absolute/path] [--profile name]")
+}
+
+private func runSetupInstallPlanTests() {
+    let exec = SetupFileKind.file(executable: true)
+    let files: [String: SetupFileKind] = ["/o/bin/omp": exec, "/found/omp": exec, "/d": .directory, "/plain": .file(executable: false)]
+    func environment(path: String?) -> SetupDiscoveryEnvironment { SetupDiscoveryEnvironment(home: "/Users/me", path: path, kind: { files[$0] ?? .missing }) }
+    func plan(omp: String? = nil, profile: String? = nil, existing: SetupExistingConfig, path: String? = nil) -> SetupInstallPlan {
+        SetupInstallCLI.plan(omp: omp, profile: profile, existing: existing, discovery: environment(path: path), sourceAppPath: "/s/OMP Usage.app", hostPid: 5)
+    }
+    func request(_ omp: String?, _ profile: String?) -> SetupRequest { SetupRequest(sourceAppPath: "/s/OMP Usage.app", hostPid: 5, ompPath: omp, profile: profile) }
+    func stopped(_ plan: SetupInstallPlan) -> SetupInstallReport {
+        guard case .stop(let report) = plan else { preconditionFailure("must stop") }
+        return report
+    }
+    let config = try! PanelConfigStore.decode(validConfigJSON.data(using: .utf8)!)
+
+    // Existing valid config: read-only request, flags ignored with one stderr note, nothing probed on disk.
+    precondition(plan(existing: .valid(config)) == .run(request: request(nil, nil), ompPath: "/opt/o/bin/omp", notes: []))
+    precondition(plan(omp: "/missing", profile: "x", existing: .valid(config)) == .run(request: request(nil, nil), ompPath: "/opt/o/bin/omp", notes: [SetupInstallCLI.ignoredNote]))
+    precondition(plan(profile: "x", existing: .valid(config)) == .run(request: request(nil, nil), ompPath: "/opt/o/bin/omp", notes: [SetupInstallCLI.ignoredNote]))
+
+    // Existing invalid/unreadable config: refusal, exit 1, never an overwrite, even with usable flags.
+    let refused = stopped(plan(omp: "/o/bin/omp", existing: .refused("Invalid panel configuration: version must be 1.")))
+    precondition(refused.exitCode == 1 && refused.stdout == nil)
+    precondition(refused.stderr?.hasPrefix("OMP Usage install failed: Invalid panel configuration: version must be 1.") == true)
+
+    // No config: --omp wins over discovery; otherwise the first discovered; default profile unless given.
+    precondition(plan(omp: "/o/bin/omp", existing: .none, path: "/found") == .run(request: request("/o/bin/omp", "default"), ompPath: "/o/bin/omp", notes: []))
+    precondition(plan(existing: .none, path: "/found:/x") == .run(request: request("/found/omp", "default"), ompPath: "/found/omp", notes: []))
+    precondition(plan(profile: "work", existing: .none, path: "/found") == .run(request: request("/found/omp", "work"), ompPath: "/found/omp", notes: []))
+
+    // No omp anywhere: exit 2 with the pass-it-explicitly message.
+    let missing = stopped(plan(existing: .none, path: "/nowhere"))
+    precondition(missing == SetupInstallReport(exitCode: 2, stdout: nil, stderr: "OMP Usage install failed: omp not found; pass --omp /absolute/path"))
+    // An explicit --omp that is unusable is an argument error (exit 2), not silently replaced by discovery.
+    for bad in ["/nope", "/d", "/plain"] {
+        let report = stopped(plan(omp: bad, existing: .none, path: "/found"))
+        precondition(report.exitCode == 2 && report.stdout == nil && report.stderr?.hasPrefix("OMP Usage install failed: omp: ") == true, "bad --omp \(bad)")
+    }
+}
+
+private func runSetupInstallReportTests() {
+    let app = "/Users/me/Applications/OMP Usage.app"
+    func success(_ action: SetupAction) -> Result<SetupSuccess, SetupFailure> {
+        .success(SetupSuccess(command: .install, action: action, appPath: app, configPath: "/c", pid: action == .activate ? 3 : nil))
+    }
+    precondition(SetupInstallCLI.report(for: success(.relaunch)) == SetupInstallReport(exitCode: 0, stdout: "OMP Usage installed: " + app, stderr: nil))
+    precondition(SetupInstallCLI.report(for: success(.activate)).exitCode == 0)
+    precondition(SetupInstallCLI.report(for: success(.continue)) == SetupInstallCLI.report(for: .failure(SetupFailure(code: "invalid-response"))), "an install never continues")
+
+    // Running app: the exact actionable text, exit 1.
+    let running = SetupInstallCLI.report(for: .failure(SetupFailure(code: "running")))
+    precondition(running == SetupInstallReport(exitCode: 1, stdout: nil, stderr: "OMP Usage install failed: OMP Usage is running; quit it (menu bar panel -> Options -> Quit) and run the installer again."))
+
+    // ManagedNode errors: the app-originated controlled text is shown verbatim; the bare code gets generic wording.
+    let node = SetupInstallCLI.report(for: .failure(SetupFailure(code: "node-unavailable", detail: ManagedNodeError.archiveMismatch.userMessage)))
+    precondition(node.exitCode == 1 && node.stderr == "OMP Usage install failed: " + ManagedNodeError.archiveMismatch.userMessage)
+    precondition(SetupInstallCLI.report(for: .failure(SetupFailure(code: "node-unavailable"))).stderr?.contains("bundled Node.js") == true)
+
+    // Helper codes: omp/profile rejection are argument errors (2); the rest exit 1. Output is always one controlled line
+    // and never mentions the window.
+    for code in ["omp-unavailable", "invalid-profile"] { precondition(SetupInstallCLI.report(for: .failure(SetupFailure(code: code))).exitCode == 2) }
+    let codes = ["running", "update-in-progress", "transaction", "ownership-mismatch", "busy", "node-unavailable", "omp-unavailable", "invalid-profile",
+                 "config-invalid", "config-changed", "not-managed", "foreign-app", "foreign-agent", "foreign-job", "foreign-state", "source-mismatch",
+                 "invalid-source", "invalid-request", "invalid-response", "missing-helper", "rollback-incomplete", "state-unsafe", "manifest-invalid",
+                 "copy-failed", "install-failed", "io-error", "unsupported", "timeout", "failed", "whatever"]
+    for code in codes {
+        let report = SetupInstallCLI.report(for: .failure(SetupFailure(code: code)))
+        guard let line = report.stderr else { preconditionFailure("failure prints stderr: \(code)") }
+        precondition(report.exitCode != 0 && report.stdout == nil && !line.contains("\n") && !line.contains("window") && !line.contains("Install & Open"), "code \(code)")
+    }
+    precondition(SetupInstallCLI.report(for: .failure(SetupFailure(code: "whatever"))).stderr?.contains("whatever") == true)
+    precondition(SetupInstallReport.failed("a\nb", exitCode: 1).stderr == "OMP Usage install failed: a b")
+}
 private func runSetupExistingConfigTests() {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("omp-setup-tests-\(UUID().uuidString)")
     try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

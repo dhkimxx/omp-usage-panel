@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { DmgCleanupError, assertDmgLayout, createDmg, dmgAppName, dmgNote, dmgNoteName, legacyDmgNote, withDmgApp, withMountedDmg } from './dmg.mjs'
+import { DmgCleanupError, assertDmgLayout, createDmg, dmgAppName, dmgNote, dmgNoteName, withDmgApp, withMountedDmg } from './dmg.mjs'
 import { appTreeHash } from './ownership.mjs'
 
 // These tests drive the real macOS hdiutil (compressed image creation, read-only attach/detach); they need a host that may attach disk images.
@@ -87,13 +87,13 @@ test('layout validation refuses extra apps, an Applications link and extra files
   assert.throws(() => assertDmgLayout(directory))
 }))
 
-test('the current note says Node.js is bundled, and an image carrying the note of an already-published release still passes layout validation', darwin, () => inTemp(directory => {
+test('the install note says Node.js is bundled and mentions the one-line installer, and an image carrying any other note is refused', darwin, () => inTemp(directory => {
   assert.match(dmgNote, /Node\.js is bundled/)
-  assert.doesNotMatch(dmgNote, /never bundles/)
-  assert.notEqual(legacyDmgNote, dmgNote)
-  const legacy = customDmg(directory, stage => { fixtureApp(stage); writeFileSync(path.join(stage, dmgNoteName), legacyDmgNote) })
-  assert.equal(withDmgApp(legacy, mounted => path.basename(mounted)), dmgAppName)
-  assert.equal(isAttached(legacy), false)
+  assert.match(dmgNote, /one-line installer/)
+  assert.match(dmgNote, /ad-hoc signed/)
+  const other = customDmg(directory, stage => { fixtureApp(stage); writeFileSync(path.join(stage, dmgNoteName), dmgNote.replace('Node.js is bundled', 'Node.js is required')) })
+  assert.throws(() => withDmgApp(other, () => 'never'), /not the expected install note/)
+  assert.equal(isAttached(other), false)
 }))
 
 test('an action failure propagates and a non-image never leaves anything attached', darwin, () => inTemp(directory => {

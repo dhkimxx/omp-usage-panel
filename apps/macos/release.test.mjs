@@ -6,7 +6,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readF
 import path from 'node:path'
 import { DmgCleanupError, createDmg, dmgAppName, dmgNote, dmgNoteName } from './dmg.mjs'
 import { appTreeHash } from './ownership.mjs'
-import { archiveName, createPreparedPackage, downloadURL, emptyFeed, feedItems, inspectArchive, parseItem, prepareArchive, prepareFromCandidate, prunedFeed, removeTemporaryTree, verifyFeedText, verifyPrepared, verifyReleaseAsset, withTemporaryDirectory } from './release.mjs'
+import { archiveName, createPreparedPackage, downloadURL, emptyFeed, feedItems, parseItem, prepareArchive, prepareFromCandidate, prunedFeed, removeTemporaryTree, verifyFeedText, verifyPrepared, verifyReleaseAsset, withTemporaryDirectory } from './release.mjs'
 import { buildFixtureApp, fixtureNodePin, inTemp, recordingHdiutil, signerFor } from './release-fixtures.mjs'
 import { verifyNodeResources } from './sparkle.mjs'
 
@@ -213,21 +213,23 @@ test('a newly built package refuses an app whose bundled Node is missing, incons
   edited.arches.x64.archiveSize = poisoned.length; edited.arches.x64.archiveSHA256 = createHash('sha256').update(poisoned).digest('hex')
   writeFileSync(manifestFile, JSON.stringify(edited)); refused(/node binary that differs from the pin/, 'archive holds other node bytes than the pin')
   reseal(app)
-  assert.equal(verifyNodeResources(app, { required: true, matchPin: false }), true, 'without a pin comparison (published releases) the same resources are structurally fine')
+  assert.equal(verifyNodeResources(app), true, 'without a pin comparison (published releases) the same resources are structurally fine')
   writeFileSync(manifestFile, manifest)
   writeFileSync(archive, archiveBytes); rmSync(resources, { recursive: true }); refused(/no bundled Node runtime/, 'no bundled Node at all')
   assert.deepEqual(readdirSync(path.join(directory, 'refused-0')), [], 'a refused package leaves no archive behind')
 }))
 
-test('an app built before Node was bundled still verifies as a published release, but is refused as a new build or CI candidate', darwin, () => inTemp(directory => {
-  const app = buildFixtureApp(directory, { bundledNode: false })
+test('an app without bundled Node is refused as a new build, a CI candidate, a published package and a published release', darwin, () => inTemp(directory => {
+  const app = buildFixtureApp(directory)
+  rmSync(path.join(app, 'Contents/Resources/node'), { recursive: true })
+  execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'pipe' })
   assert.throws(() => prepare(directory, { app, name: 'new-build' }), /no bundled Node runtime/)
   const stage = path.join(directory, 'old-release'); mkdirSync(stage)
   const archive = createDmg({ app, output: path.join(stage, archiveName(version)) })
-  prepareArchive({ archive, version, notes, sourceCommit: head, currentFeed, signer, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000', inspect: file => inspectArchive({ file, version, appTreeHash }) })
+  prepareArchive({ archive, version, notes, sourceCommit: head, currentFeed, signer, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000', inspect: () => appTreeHash(app) })
   const item = parseItem(/** @type {string} */ (feedItems(readFileSync(path.join(stage, 'appcast.xml'), 'utf8')).at(-1)))
-  assert.equal(verifyReleaseAsset({ file: archive, item, version, publicEDKey, appTreeHash }), sha256Of(archive), 'a published release without node resources keeps verifying')
-  assert.throws(() => verifyReleaseAsset({ file: archive, item, version, publicEDKey, appTreeHash, requireBundledNode: true }), /no bundled Node runtime/)
+  assert.throws(() => verifyReleaseAsset({ file: archive, item, version, publicEDKey, appTreeHash }), /no bundled Node runtime/, 'a published release must carry the resources')
+  assert.throws(() => verifyReleaseAsset({ file: archive, item, version, publicEDKey, appTreeHash, matchPin: true }), /no bundled Node runtime/)
   assert.throws(() => verify(stage), /no bundled Node runtime/, 'publishing refuses a package without the bundled runtime')
   const candidateStage = path.join(directory, 'candidate-stage'); mkdirSync(candidateStage)
   const candidate = { archivePath: archive, sha256: sha256Of(archive), manifest: { sourceCommit: head, appTreeSHA256: appTreeHash(app) }, provenance: {} }
@@ -236,21 +238,15 @@ test('an app built before Node was bundled still verifies as a published release
   assert.deepEqual(spy.signed, [], 'a CI candidate without the bundled runtime is never signed')
 }))
 
-test('from the first bundled version on, a published release must carry structurally valid node resources; its manifest is not compared with the current pin', darwin, () => inTemp(directory => {
+test('a published release must carry structurally valid node resources; its manifest is not compared with the current pin', darwin, () => inTemp(directory => {
   const stage = path.join(directory, 'stage'); mkdirSync(stage)
-  /** @param {string} appVersion @param {boolean} bundledNode */
-  const publish = (appVersion, bundledNode) => {
-    const app = buildFixtureApp(directory, { version: appVersion, bundledNode })
-    const archive = createDmg({ app, output: path.join(stage, archiveName(appVersion)) })
-    prepareArchive({ archive, version: appVersion, notes, sourceCommit: head, currentFeed, signer, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000', inspect: () => appTreeHash(app) })
-    return { archive, item: parseItem(/** @type {string} */ (feedItems(readFileSync(path.join(stage, 'appcast.xml'), 'utf8')).at(-1))) }
-  }
-  const missing = publish('1.1.0', false)
-  assert.throws(() => verifyReleaseAsset({ file: missing.archive, item: missing.item, version: '1.1.0', publicEDKey, appTreeHash }), /no bundled Node runtime/)
-  rmSync(path.join(stage, 'appcast.xml')); rmSync(path.join(stage, 'release.json'))
+  const app = buildFixtureApp(directory)
+  const archive = createDmg({ app, output: path.join(stage, archiveName(version)) })
+  prepareArchive({ archive, version, notes, sourceCommit: head, currentFeed, signer, pubDate: 'Thu, 12 Nov 2026 07:00:00 +0000', inspect: () => appTreeHash(app) })
+  const item = parseItem(/** @type {string} */ (feedItems(readFileSync(path.join(stage, 'appcast.xml'), 'utf8')).at(-1)))
   // The fixtures' binary identity is not the committed pin's (as after a later pin bump): the published release still verifies.
-  const present = publish('1.1.1', true)
-  assert.equal(verifyReleaseAsset({ file: present.archive, item: present.item, version: '1.1.1', publicEDKey, appTreeHash }), sha256Of(present.archive))
+  assert.equal(verifyReleaseAsset({ file: archive, item, version, publicEDKey, appTreeHash }), sha256Of(archive))
+  assert.throws(() => verifyReleaseAsset({ file: archive, item, version, publicEDKey, appTreeHash, matchPin: true }), /pinned|differs from the pin/, 'a new build is compared with the pin')
 }))
 
 // ---- CI candidate promotion: the DMG bytes GitHub built and attested are the bytes that get signed.

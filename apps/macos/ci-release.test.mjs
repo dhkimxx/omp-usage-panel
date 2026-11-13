@@ -1,6 +1,7 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -425,7 +426,9 @@ test('a candidate is not built for an untrusted trigger, another commit, a dirty
   await refuses('other commit', { env: trustedEnv, withApp: provide('d'.repeat(40)) })
   await refuses('dirty tree', { env: trustedEnv, withApp: provide(undefined) })
   await refuses('wrong app version', { env: trustedEnv, withApp: async (_options, body) => body({ app: buildFixtureApp(directory, { version: '0.0.1' }), appTreeHash, sourceCommit: head }) })
-  await assert.rejects(buildCandidate({ env: trustedEnv, output: path.join(directory, 'out-no-node'), nodePin: fixtureNodePin, withApp: async (_options, body) => body({ app: buildFixtureApp(directory, { version: '0.0.2', bundledNode: false }), appTreeHash, sourceCommit: head }) }), /no bundled Node runtime/)
+  const noNode = buildFixtureApp(directory, { version: '0.0.2' })
+  rmSync(path.join(noNode, 'Contents/Resources/node'), { recursive: true }); execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', noNode], { stdio: 'pipe' })
+  await assert.rejects(buildCandidate({ env: trustedEnv, output: path.join(directory, 'out-no-node'), nodePin: fixtureNodePin, withApp: async (_options, body) => body({ app: noNode, appTreeHash, sourceCommit: head }) }), /no bundled Node runtime/)
   assert.equal(existsSync(path.join(directory, 'out-no-node')), false, 'no candidate without the bundled Node runtime')
   assert.deepEqual(readdirSync(directory).filter(name => name.startsWith('.omp-ci-')), [], 'no staging directory')
   const existing = path.join(directory, 'existing'); mkdirSync(existing); writeFileSync(path.join(existing, 'keep'), 'x')

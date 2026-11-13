@@ -142,7 +142,7 @@ export async function buildCandidate({ output = defaultOutput, env = process.env
       if (sourceCommit !== trigger.sourceCommit) throw new Error(`The checked-out commit ${sourceCommit} is not the commit that triggered this run (${trigger.sourceCommit})`)
       const archive = path.join(stage, archiveName(version))
       createDmg({ app, output: archive })
-      const appTreeSHA256 = inspectArchive({ file: archive, version, appTreeHash, expectedAppTreeSHA256: appTreeHash(app), expectedFrom: 'the built app', requireBundledNode: true, nodePin })
+      const appTreeSHA256 = inspectArchive({ file: archive, version, appTreeHash, expectedAppTreeSHA256: appTreeHash(app), expectedFrom: 'the built app', matchPin: true, nodePin })
       const bytes = readFileSync(archive)
       /** @type {Candidate} */
       const built = {

@@ -12,10 +12,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         switch SetupLaunch.route(arguments: CommandLine.arguments, bundlePath: Bundle.main.bundlePath, home: home, resolve: SetupLaunch.resolvingSymlinks) {
         case .normal(let configPath): startPanel(configPath: configPath)
-        case .usage: fail("Usage: OMPUsagePanel [--config path]")
+        case .usage: Self.finish(SetupInstallReport(exitCode: 2, stdout: nil, stderr: SetupLaunch.usageText))
         case .setup: showSetup(home: home, notice: nil)
         case .managedHandoff: handOff(home: home)
+        case .install(let omp, let profile): install(home: home, omp: omp, profile: profile)
         }
+    }
+
+    /// Headless `--install`: no window, menu, panel or updater. Every path ends in `exit`, and the helper install is
+    /// never signalled (the runner waits for its real exit), so there is no hang and no half-killed transaction.
+    private func install(home: String, omp: String?, profile: String?) {
+        let existing = SetupExistingConfig.read(path: SetupLaunch.defaultConfigPath(home: home))
+        let discovery = SetupDiscoveryEnvironment(home: home, path: ProcessInfo.processInfo.environment["PATH"])
+        let plan = SetupInstallCLI.plan(omp: omp, profile: profile, existing: existing, discovery: discovery,
+                                        sourceAppPath: Bundle.main.bundlePath, hostPid: Int(ProcessInfo.processInfo.processIdentifier))
+        switch plan {
+        case .stop(let report): Self.finish(report)
+        case .run(let request, let ompPath, let notes):
+            for note in notes { FileHandle.standardError.write(Data((note + "\n").utf8)) }
+            setupRunner.run(command: .install, ompPath: ompPath, helperPath: helperPath, request: request, timeout: SetupRunner.installNoticeDelay) { result in
+                Self.finish(SetupInstallCLI.report(for: result))
+            }
+        }
+    }
+
+    private static func finish(_ report: SetupInstallReport) -> Never {
+        if let line = report.stdout { FileHandle.standardOutput.write(Data((line + "\n").utf8)) }
+        if let line = report.stderr { FileHandle.standardError.write(Data((line + "\n").utf8)) }
+        exit(report.exitCode)
     }
 
     private func startPanel(configPath: String) {
