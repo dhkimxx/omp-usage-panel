@@ -5,9 +5,36 @@
     <link>https://github.com/dhkimxx/omp-usage-panel</link>
     <description>Signed OMP Usage application updates</description>
     <language>en</language>
+    <item>
+      <title>OMP Usage 1.0.0</title>
+      <pubDate>Fri, 13 Nov 2026 03:23:55 +0000</pubDate>
+      <sparkle:version>1.0.0</sparkle:version>
+      <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <omp:appTreeSHA256>7a7955827fabd3726d0e146a4a249bd71a77c47c543af8c85360f0863305e1d9</omp:appTreeSHA256>
+      <omp:sourceCommit>f1a98eaafbc4d9f110ced7d647e16f89529f4423</omp:sourceCommit>
+      <description sparkle:descriptionFormat="plain-text"><![CDATA[## First public release
+
+A native macOS panel for omp usage: compact provider rings beside the camera (or a floating capsule), an expanded dashboard with per-provider and per-account detail, and in-app updates.
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dhkimxx/omp-usage-panel/main/install.sh | sh
+```
+
+The script downloads this DMG, checks its size and SHA-256 against the digest GitHub publishes, installs the app to `~/Applications` and registers a per-user login LaunchAgent. No admin rights, no Node.js and no Gatekeeper prompt: files fetched with `curl` are not quarantined by macOS.
+
+You can also download the DMG manually; a browser-downloaded copy is quarantined, so macOS asks you to allow it in System Settings → Privacy & Security first.
+
+Requires macOS 13+ and an authenticated omp that supports `omp usage --json`. Node.js 22 is bundled (about 49 MB for both architectures) and unpacked on first start.
+
+The app is ad-hoc code-signed and not Apple-notarized. Updates are Ed25519-signed and verified by Sparkle.]]></description>
+      <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v1.0.0/OMP-Usage-1.0.0.dmg" length="53074557" type="application/octet-stream" sparkle:edSignature="jQfZI1XvjS6yC4ArEB7LMtBwfjG77drMJ9MeKYcdhuYfl0Rqc3p9c0UwmHs63qNcu2rgPmu/PE6EUSMBUKxaBg==" />
+    </item>
   </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: 02RL/m4JW/RbpKDW1egirrO7Q/NQFoPGlIjLIbq6MQ/e6wKOjCYsMwtfb+WHztqqHAuxL61UCUUYwq5D1gCwBQ==
-length: 407
+edSignature: 3eZBtn30kS9PW7rXwU4fYPS3kpSbTwrq+0kE247Mpf8E/cpSERm3KF8MsIs0axRWfbiH1KdNjAvIRKLA3iQMBg==
+length: 2314
 -->
