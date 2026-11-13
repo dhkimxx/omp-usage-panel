@@ -50,9 +50,35 @@ Existing users: choose Check for Updates and install 1.0.1. Configuration, displ
 New users: open the DMG, launch OMP Usage.app and choose Install & Open. Requires macOS 13+, Node.js 22.18+ and an authenticated omp with JSON usage support. The app is ad-hoc code-signed and not Apple-notarized.]]></description>
       <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v1.0.1/OMP-Usage-1.0.1.dmg" length="3703616" type="application/octet-stream" sparkle:edSignature="I3LaL4UZLr2ROdkEN8KBhxy6o0omxC4UqsTUs2VWkUPPSBsGjQl/yI+GKT6GLA+ImedUbfI787bZzhXYEcJ/Cg==" />
     </item>
+    <item>
+      <title>OMP Usage 1.1.0</title>
+      <pubDate>Fri, 13 Nov 2026 02:22:04 +0000</pubDate>
+      <sparkle:version>1.1.0</sparkle:version>
+      <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <omp:appTreeSHA256>deeb9e89d9a7049425a8fc0254cec325ed20c4c9258d8334f76326a8d6608e94</omp:appTreeSHA256>
+      <omp:sourceCommit>9dc31cc4669f9fe964c5eaa2cc4015761de72b41</omp:sourceCommit>
+      <description sparkle:descriptionFormat="plain-text"><![CDATA[## Node.js is now bundled
+
+- OMP Usage no longer needs a Node.js installation. It ships a pinned official Node.js 22.23.5 and runs the collector, setup and updater from it, so your own Node.js version (or an `nvm uninstall`) can no longer break collection.
+- On first start the app unpacks the runtime for your Mac's architecture into `~/Library/Application Support/omp-usage-panel/runtime/` (about 113 MB, excluded from backups). It is checked against pinned SHA-256 values and Node.js's Developer ID signature before it is ever run, and it is never run from inside the app bundle.
+- Setup and Settings no longer ask for a Node path. Existing configurations are kept byte for byte; the old `nodePath` is only used to pick the first `PATH` directory for omp.
+- The download is about 49 MB larger because it carries the Node.js runtime for both Apple Silicon and Intel.
+
+## Release automation
+
+- Releases from 1.1.0 on must carry valid Node.js resources; older releases keep verifying, and audits do not break when the pinned Node.js version changes.
+
+## Install or update
+
+Existing users: choose Check for Updates and install 1.1.0. This first update is still carried out by your installed version, so the Node.js it was configured with must still exist until the update finishes. After that, no Node.js is needed.
+
+New users: open the DMG, launch OMP Usage.app and choose Install & Open. Requires macOS 13+ and an authenticated omp with JSON usage support. The app is ad-hoc code-signed and not Apple-notarized.]]></description>
+      <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v1.1.0/OMP-Usage-1.1.0.dmg" length="53065778" type="application/octet-stream" sparkle:edSignature="y1A4TrghlLQbzeXspEBfIQZPYWgQc3c6mntaffCgyCUS+88Kcgwu5BytOg1qKWrMsFRIPzJbV1g44hrqTTI6Ag==" />
+    </item>
   </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: pEW3Hrm/p46kdrjlONZupuEbCcGIduIZxk7NpFW7APMRDFEwzVmSeQ+zh7agu4/zejs/Uz0Ubt9LTO/NR1+nBQ==
-length: 4437
+edSignature: LXJOJGYu5+1RXyA8vD1caheGUMdGwT8abQcTEDqxV4cGQ8223JpceayZEO6rGC+lddfsZnYYb95ao4JP7qBzCA==
+length: 6808
 -->
