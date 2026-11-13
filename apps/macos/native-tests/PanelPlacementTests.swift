@@ -6,12 +6,7 @@ private let dellUUID = "63FD4F17-3FBA-46CD-AD01-70F294053371"
 private let builtIn = PlacementDisplay(uuid: builtInUUID, frame: CGRect(x: 0, y: 0, width: 1728, height: 1117), isPrimary: true, name: "Built-in Retina Display")
 private let dell = PlacementDisplay(uuid: dellUUID, frame: CGRect(x: -446, y: 1117, width: 1920, height: 1080), isPrimary: false, name: "DELL U2417H")
 
-private func isolatedDefaults() -> UserDefaults {
-    let name = "omp-placement-tests-\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: name)!
-    defaults.removePersistentDomain(forName: name)
-    return defaults
-}
+private func isolatedDefaults() -> (UserDefaults, () -> Void) { makeIsolatedDefaults(prefix: "omp-placement-tests") }
 
 func runPanelPlacementTests() {
     let primary = PanelPlacementPreferences.defaults
@@ -76,7 +71,8 @@ func runPanelPlacementTests() {
     precondition(legacy.displayIndex == 1 && legacy.manualTopCenter == nil)
 
     // Preferences store: reading writes nothing, prepare is pure, savePrepared persists and survives a restart.
-    let defaults = isolatedDefaults()
+    let (defaults, cleanup) = isolatedDefaults()
+    defer { cleanup() }
     let store = PanelPlacementPreferencesStore(defaults: defaults)
     precondition(store.preferences == .defaults && defaults.data(forKey: PanelPlacementPreferencesStore.storageKey) == nil)
     let prepared = try! store.prepare(PanelPlacementPreferences(displayUUID: "  " + dellUUID.lowercased() + " "))
@@ -88,7 +84,8 @@ func runPanelPlacementTests() {
     precondition(PanelPlacementPreferencesStore(defaults: defaults).preferences == .defaults)
 
     // Manual store: legacy startup preserves coordinates; clear removes every manual form.
-    let manualDefaults = isolatedDefaults()
+    let (manualDefaults, manualCleanup) = isolatedDefaults()
+    defer { manualCleanup() }
     manualDefaults.set([512.5, 900.0], forKey: PanelManualPlacementStore.positionKey)
     manualDefaults.set([40.0, 20.0], forKey: PanelManualPlacementStore.legacyKey)
     let manualStore = PanelManualPlacementStore(defaults: manualDefaults)

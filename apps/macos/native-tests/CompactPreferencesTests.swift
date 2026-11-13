@@ -6,11 +6,7 @@ private func summary(_ provider: String, percent: Double?, accounts: Int = 1) ->
                     metricLabel: nil, windowLabel: nil, notes: [])
 }
 
-private func isolatedDefaults() -> (UserDefaults, () -> Void) {
-    let name = "omp-compact-preferences-tests-\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: name)!
-    return (defaults, { defaults.removePersistentDomain(forName: name) })
-}
+private func isolatedDefaults() -> (UserDefaults, () -> Void) { makeIsolatedDefaults(prefix: "omp-compact-preferences-tests") }
 
 private func save(_ store: CompactPreferencesStore, _ preferences: CompactPreferences) {
     guard let prepared = try? store.prepare(preferences) else { preconditionFailure("Expected encodable preferences") }

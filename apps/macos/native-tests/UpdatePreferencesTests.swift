@@ -1,10 +1,6 @@
 import Foundation
 
-private func isolatedDefaults() -> (UserDefaults, () -> Void) {
-    let name = "omp-update-preferences-tests-\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: name)!
-    return (defaults, { defaults.removePersistentDomain(forName: name) })
-}
+private func isolatedDefaults() -> (UserDefaults, () -> Void) { makeIsolatedDefaults(prefix: "omp-update-preferences-tests") }
 
 private let t0 = Date(timeIntervalSince1970: 1_800_000_000)
 private let day: TimeInterval = 24 * 60 * 60

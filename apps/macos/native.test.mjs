@@ -12,7 +12,7 @@ test('native models, inline account selection and dock geometry preserve behavio
   try {
     const executable = join(temp, 'models-tests')
     const sources = ['ExactConfigMap', 'Models', 'PanelConfigStore', 'GeneralSettingsDraft', 'CompactPreferences', 'PanelPlacement', 'UpdateModel', 'UpdatePreferences', 'DockModel', 'DashboardModel', 'ProviderDetailModel', 'DropdownModel', 'SetupModel', 'ManagedNode'].map((name) => join(directory, `native/${name}.swift`))
-    const tests = ['ModelsTests', 'PanelConfigStoreTests', 'GeneralSettingsDraftTests', 'CompactPreferencesTests', 'PanelPlacementTests', 'UpdateModelTests', 'UpdatePreferencesTests', 'DockModelTests', 'DashboardModelTests', 'ProviderDetailModelTests', 'DropdownModelTests', 'SetupModelTests', 'ManagedNodeTests'].map((name) => join(directory, `native-tests/${name}.swift`))
+    const tests = ['NativeTestSupport', 'ModelsTests', 'PanelConfigStoreTests', 'GeneralSettingsDraftTests', 'CompactPreferencesTests', 'PanelPlacementTests', 'UpdateModelTests', 'UpdatePreferencesTests', 'DockModelTests', 'DashboardModelTests', 'ProviderDetailModelTests', 'DropdownModelTests', 'SetupModelTests', 'ManagedNodeTests'].map((name) => join(directory, `native-tests/${name}.swift`))
     const build = spawnSync('xcrun', ['swiftc', '-swift-version', '5', ...sources, ...tests, '-o', executable], { encoding: 'utf8' })
     assert.equal(build.status, 0, build.stderr || build.error?.message)
     const run = spawnSync(executable, [], { encoding: 'utf8' })
