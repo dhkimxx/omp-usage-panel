@@ -16,8 +16,17 @@ struct PanelScreenInventory {
             if let id, let raw = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() {
                 uuid = CFUUIDCreateString(nil, raw) as String
             }
-            return PlacementDisplay(uuid: uuid, frame: screen.frame, isPrimary: id == primaryID, name: screen.localizedName)
+            return PlacementDisplay(uuid: uuid, frame: screen.frame, isPrimary: id == primaryID, name: screen.localizedName,
+                                    hasNotch: DockGeometry.hasNotch(in: DockScreenMetrics(screen: screen)))
         }
         return PanelScreenInventory(displays: displays, screens: screens)
+    }
+}
+
+extension DockScreenMetrics {
+    init(screen: NSScreen) {
+        self.init(frame: screen.frame, visibleFrame: screen.visibleFrame, safeAreaTop: screen.safeAreaInsets.top,
+                  menuBarHeight: NSStatusBar.system.thickness, auxiliaryTopLeft: screen.auxiliaryTopLeftArea ?? .zero,
+                  auxiliaryTopRight: screen.auxiliaryTopRightArea ?? .zero)
     }
 }

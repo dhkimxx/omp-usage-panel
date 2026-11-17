@@ -14,13 +14,25 @@ enum PanelDisplayIdentity {
 
 struct PanelPlacementPreferences: Codable, Equatable {
     var displayUUID: String?
+    var lockToNotch: Bool
 
-    init(displayUUID: String? = nil) { self.displayUUID = displayUUID }
+    init(displayUUID: String? = nil, lockToNotch: Bool = false) {
+        self.displayUUID = displayUUID
+        self.lockToNotch = lockToNotch
+    }
+
+    private enum CodingKeys: String, CodingKey { case displayUUID, lockToNotch }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        displayUUID = try values.decodeIfPresent(String.self, forKey: .displayUUID)
+        lockToNotch = try values.decodeIfPresent(Bool.self, forKey: .lockToNotch) ?? false
+    }
 
     static let defaults = PanelPlacementPreferences()
 
     var normalized: PanelPlacementPreferences {
-        PanelPlacementPreferences(displayUUID: PanelDisplayIdentity.normalize(displayUUID))
+        PanelPlacementPreferences(displayUUID: PanelDisplayIdentity.normalize(displayUUID), lockToNotch: lockToNotch)
     }
 }
 
@@ -29,6 +41,8 @@ struct PanelDisplayChoice: Equatable {
     let uuid: String
     let name: String
     let isPrimary: Bool
+    /// Reuses the resolver's measured camera-safe notch eligibility; never inferred from the display name.
+    let hasNotch: Bool
 }
 
 /// Created only by `PanelPlacementPreferencesStore.prepare(_:)`, so `savePrepared` has no throwing step left.
@@ -78,11 +92,14 @@ struct PlacementDisplay: Equatable {
     let isPrimary: Bool
     let name: String
 
-    init(uuid: String?, frame: CGRect, isPrimary: Bool, name: String) {
+    /// True only when measured screen metrics support camera-safe notch attachment.
+    let hasNotch: Bool
+    init(uuid: String?, frame: CGRect, isPrimary: Bool, name: String, hasNotch: Bool) {
         self.uuid = PanelDisplayIdentity.normalize(uuid)
         self.frame = frame
         self.isPrimary = isPrimary
         self.name = name
+        self.hasNotch = hasNotch
     }
 }
 
@@ -152,6 +169,13 @@ struct PanelPlacementResolution: Equatable {
     let displayIndex: Int
     /// Effective global top-center for the geometry; nil selects automatic placement. Never persisted.
     let manualTopCenter: CGPoint?
+    let isNotchLocked: Bool
+
+    init(displayIndex: Int, manualTopCenter: CGPoint?, isNotchLocked: Bool) {
+        self.displayIndex = displayIndex
+        self.manualTopCenter = manualTopCenter
+        self.isNotchLocked = isNotchLocked
+    }
 }
 
 enum PanelPlacementResolver {
@@ -177,24 +201,41 @@ enum PanelPlacementResolver {
         return primaryIndex(in: displays)
     }
 
+    /// Lock only the configured target, never a disconnected target's fallback or some other notched display.
+    static func isNotchLockActive(preferences: PanelPlacementPreferences, displays: [PlacementDisplay]) -> Bool {
+        guard preferences.lockToNotch, let uuid = PanelDisplayIdentity.normalize(preferences.displayUUID),
+              let target = targetIndex(preferences, in: displays) else { return false }
+        return displays[target].uuid == uuid && displays[target].hasNotch
+    }
+
+    /// A monitor change discards manual intent unless the new target actually activates notch lock.
+    /// Toggling only the lock never clears the saved position.
+    static func shouldClearManualPlacement(from previous: PanelPlacementPreferences, to next: PanelPlacementPreferences,
+                                          displays: [PlacementDisplay]) -> Bool {
+        previous.displayUUID != next.displayUUID && !isNotchLockActive(preferences: next, displays: displays)
+    }
+
     static func resolve(preferences: PanelPlacementPreferences, manual: PanelManualPlacement?, legacyPoint: CGPoint?,
                         displays: [PlacementDisplay]) -> PanelPlacementResolution? {
         guard let target = targetIndex(preferences, in: displays) else { return nil }
+        if isNotchLockActive(preferences: preferences, displays: displays) {
+            return PanelPlacementResolution(displayIndex: target, manualTopCenter: nil, isNotchLocked: true)
+        }
         if let manual {
             if let anchor = manual.anchor {
                 if let index = displays.firstIndex(where: { $0.uuid == anchor.displayUUID }) {
-                    return PanelPlacementResolution(displayIndex: index, manualTopCenter: point(anchor.offset, on: displays[index]))
+                    return PanelPlacementResolution(displayIndex: index, manualTopCenter: point(anchor.offset, on: displays[index]), isNotchLocked: false)
                 }
                 // Anchor display is away: show on the fallback at the same relative spot; saved data stays as is.
-                return PanelPlacementResolution(displayIndex: target, manualTopCenter: point(anchor.offset, on: displays[target]))
+                return PanelPlacementResolution(displayIndex: target, manualTopCenter: point(anchor.offset, on: displays[target]), isNotchLocked: false)
             }
             let index = containingIndex(manual.topCenter, in: displays) ?? target
-            return PanelPlacementResolution(displayIndex: index, manualTopCenter: manual.topCenter)
+            return PanelPlacementResolution(displayIndex: index, manualTopCenter: manual.topCenter, isNotchLocked: false)
         }
         if let legacyPoint, let index = containingIndex(legacyPoint, in: displays) {
-            return PanelPlacementResolution(displayIndex: index, manualTopCenter: nil)
+            return PanelPlacementResolution(displayIndex: index, manualTopCenter: nil, isNotchLocked: false)
         }
-        return PanelPlacementResolution(displayIndex: target, manualTopCenter: nil)
+        return PanelPlacementResolution(displayIndex: target, manualTopCenter: nil, isNotchLocked: false)
     }
 
     private static func point(_ offset: CGPoint, on display: PlacementDisplay) -> CGPoint {
@@ -211,7 +252,9 @@ enum PanelPlacementResolver {
     /// Names are labels only; disambiguating equal names is the Settings UI's job.
     static func choices(_ displays: [PlacementDisplay]) -> [PanelDisplayChoice] {
         displays
-            .compactMap { display in display.uuid.map { PanelDisplayChoice(uuid: $0, name: display.name, isPrimary: display.isPrimary) } }
+            .compactMap { display in
+                display.uuid.map { PanelDisplayChoice(uuid: $0, name: display.name, isPrimary: display.isPrimary, hasNotch: display.hasNotch) }
+            }
             .sorted { lhs, rhs in
                 if lhs.isPrimary != rhs.isPrimary { return lhs.isPrimary }
                 if lhs.name != rhs.name { return lhs.name < rhs.name }
