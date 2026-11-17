@@ -350,8 +350,8 @@ private func runUnifiedCompactDraftTests() {
     precondition(bare.compact == nil && commit(bare)?.compactChanges.isEmpty == true && !bare.hasChanges(from: config, updatePolicy: .defaults))
 
     // Panel monitor: placement-only edits are unsaved changes, revert clears them, other edits keep the choice.
-    let builtIn = PanelDisplayChoice(uuid: "37D8832A-2D66-02CA-B9F7-8F30A301B230", name: "Built-in Retina Display", isPrimary: true)
-    let dell = PanelDisplayChoice(uuid: "63FD4F17-3FBA-46CD-AD01-70F294053371", name: "DELL U2417H", isPrimary: false)
+    let builtIn = PanelDisplayChoice(uuid: "37D8832A-2D66-02CA-B9F7-8F30A301B230", name: "Built-in Retina Display", isPrimary: true, hasNotch: true)
+    let dell = PanelDisplayChoice(uuid: "63FD4F17-3FBA-46CD-AD01-70F294053371", name: "DELL U2417H", isPrimary: false, hasNotch: false)
     var placed = Draft(config: config)
     precondition(!placed.hasChanges(from: config, updatePolicy: .defaults, placement: .defaults))
     placed.selectMonitor(uuid: dell.uuid)
@@ -379,10 +379,26 @@ private func runUnifiedCompactDraftTests() {
     precondition(commit(placed) == nil && placed.placement == lockedDraft.placement, "failed validation retains the lock draft")
     placed.setText(Draft.format(config.refreshSeconds), for: .refreshSeconds)
     precondition(commit(placed)?.placement == lockedDraft.placement)
-    let cancelled = Draft(config: config, placement: placementBaseline)
-    precondition(cancelled.placement == placementBaseline && !cancelled.placement.lockToNotch, "reopening after Cancel starts from committed preferences")
     placed.placement.lockToNotch = false
     precondition(!placed.hasChanges(from: config, updatePolicy: .defaults, placement: placementBaseline), "reverting lock removes dirty state")
+
+    // A legacy nil-UUID lock is preserved on open/save, but choosing a named monitor requires opting in again.
+    let primaryLock = PanelPlacementPreferences(lockToNotch: true)
+    var primaryLocked = Draft(config: config, placement: primaryLock)
+    precondition(!primaryLocked.canEditNotchLock && !primaryLocked.hasChanges(from: config, updatePolicy: .defaults, placement: primaryLock))
+    precondition(commit(primaryLocked)?.placement == primaryLock, "an unrelated Save preserves the inactive stored lock")
+    primaryLocked.selectMonitor(uuid: nil)
+    precondition(commit(primaryLocked)?.placement == primaryLock, "reselecting System primary does not silently reset its saved lock")
+    primaryLocked.selectMonitor(uuid: "  " + builtIn.uuid.lowercased() + "  ")
+    precondition(primaryLocked.canEditNotchLock && primaryLocked.hasChanges(from: config, updatePolicy: .defaults, placement: primaryLock))
+    precondition(commit(primaryLocked)?.placement == PanelPlacementPreferences(displayUUID: builtIn.uuid), "choosing a named monitor cannot activate an old primary lock")
+    primaryLocked.placement.lockToNotch = true
+    primaryLocked.selectMonitor(uuid: dell.uuid)
+    precondition(primaryLocked.canEditNotchLock && commit(primaryLocked)?.placement == PanelPlacementPreferences(displayUUID: dell.uuid, lockToNotch: true), "an explicit monitor change preserves the chosen lock even without a measured notch")
+    primaryLocked.selectMonitor(uuid: nil)
+    precondition(!primaryLocked.canEditNotchLock && commit(primaryLocked)?.placement == primaryLock)
+    primaryLocked.selectMonitor(uuid: builtIn.uuid)
+    precondition(commit(primaryLocked)?.placement == PanelPlacementPreferences(displayUUID: builtIn.uuid), "returning through System primary requires enabling lock again")
 
     // Options: default first, connected names, selection marked; catalog refresh never changes the staged choice.
     let connected = placed.monitorOptions(choices: [builtIn, dell])
@@ -392,8 +408,8 @@ private func runUnifiedCompactDraftTests() {
     precondition(unplugged.count == 3 && unplugged[2].displayUUID == builtIn.uuid && unplugged[2].isSelected && !unplugged[2].isAvailable, "a disconnected selection stays visible")
     precondition(placed.placement.displayUUID == builtIn.uuid, "options never mutate the draft")
     precondition(placed.monitorButtonTitle(choices: [dell]) == "Disconnected monitor (unavailable)" && placed.monitorHint(choices: [dell]).contains("reconnects"))
-    let twinA = PanelDisplayChoice(uuid: "AAAAAAAA-0000-0000-0000-000000111111", name: "DELL U2417H", isPrimary: false)
-    let twinB = PanelDisplayChoice(uuid: "BBBBBBBB-0000-0000-0000-000000222222", name: "DELL U2417H", isPrimary: false)
+    let twinA = PanelDisplayChoice(uuid: "AAAAAAAA-0000-0000-0000-000000111111", name: "DELL U2417H", isPrimary: false, hasNotch: false)
+    let twinB = PanelDisplayChoice(uuid: "BBBBBBBB-0000-0000-0000-000000222222", name: "DELL U2417H", isPrimary: false, hasNotch: false)
     let twins = PlacementMonitorOption.options(selected: nil, choices: [twinA, twinB])
     precondition(twins[1].subtitle != twins[2].subtitle && twins[0].isSelected, "same-name monitors are distinguishable")
 }

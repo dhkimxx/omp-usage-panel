@@ -92,7 +92,6 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private var manualPlacement: PanelManualPlacement?
     private var hiddenForPlacement = false
     private var frameAnimation: DockFrameAnimation?
-    private var placementReevaluation: DispatchWorkItem?
     private var animationTarget: DockLayout?
     private var animationTargetExpansion: CGFloat = 0
     private var animationTargetBlend: CGFloat = 0
@@ -180,10 +179,6 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         bindCollector()
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sessionBecameActive), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
-        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
-                     NSWorkspace.activeSpaceDidChangeNotification] {
-            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screensChanged), name: name, object: nil)
-        }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 53, let self = self,
                   event.window === self.panel, self.interaction.presentation == .expanded,
@@ -213,7 +208,6 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         generalSettings.close()
         cancelHover()
         cancelFrameAnimation()
-        placementReevaluation?.cancel(); placementReevaluation = nil
         refreshTimer?.invalidate(); clockTimer?.invalidate()
         removeEventMonitors()
         NotificationCenter.default.removeObserver(self)
@@ -225,7 +219,6 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         refreshTimer?.invalidate(); clockTimer?.invalidate()
-        placementReevaluation?.cancel()
     }
     private func removeEventMonitors() {
         for monitor in [keyMonitor, localPointerMonitor, globalPointerMonitor].compactMap({ $0 }) {
@@ -234,19 +227,6 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         keyMonitor = nil; localPointerMonitor = nil; globalPointerMonitor = nil
     }
     @objc private func screensChanged() {
-        placementReevaluation?.cancel()
-        reevaluatePlacement()
-        let work = DispatchWorkItem { [weak self] in
-            self?.placementReevaluation = nil
-            self?.reevaluatePlacement()
-        }
-        placementReevaluation = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
-    }
-    private func reevaluatePlacement() {
-        cancelHover()
-        cancelFrameAnimation()
-        panel.cancelDragging()
         generalSettings.updateDisplays(PanelPlacementResolver.choices(PanelScreenInventory.current().displays))
         positionPanel()
     }
@@ -576,7 +556,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
             if expansion == 0 { updateInteractionMayHaveReleased() }
         }
         let display = inventory.displays[resolution.displayIndex]
-        if commitManual, !resolution.isNotchLocked, var manual = manualPlacement {
+        if commitManual, var manual = manualPlacement {
             let point = CGPoint(x: layout.frame.midX, y: layout.frame.maxY)
             manual.topCenter = point
             manual.anchor = PanelPlacementResolver.anchor(for: point, on: display)
@@ -711,6 +691,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         if active { positionPanel() } else { renderHeader(); updateInteractionMayHaveReleased() }
     }
     private func dragTo(_ origin: NSPoint) {
+        // Check before changing manual intent, then resolve and save against the same display snapshot.
         let inventory = PanelScreenInventory.current()
         guard !PanelPlacementResolver.isNotchLockActive(preferences: placementStore.preferences, displays: inventory.displays) else {
             panel.cancelDragging(); positionPanel(inventory: inventory); return

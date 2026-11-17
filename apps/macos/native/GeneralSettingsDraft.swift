@@ -546,7 +546,36 @@ struct GeneralSettingsDraft: Equatable {
 
     /// Stages the monitor choice: `nil` follows the System primary display, a UUID pins that physical monitor.
     /// Selecting the UUID of the current primary display is deliberately distinct from `nil`.
-    mutating func selectMonitor(uuid: String?) { placement.displayUUID = uuid }
+    /// A saved System-primary lock remains lossless until the user chooses a named target. That transition
+    /// resets the inactive lock, so choosing a monitor cannot unexpectedly enable it.
+    mutating func selectMonitor(uuid: String?) {
+        let selected = PanelDisplayIdentity.normalize(uuid)
+        if !canEditNotchLock, selected != nil { placement.lockToNotch = false }
+        placement.displayUUID = selected
+    }
+
+    var canEditNotchLock: Bool { PanelDisplayIdentity.normalize(placement.displayUUID) != nil }
+
+    func notchLockHint(choices: [PanelDisplayChoice]) -> String {
+        guard let uuid = PanelDisplayIdentity.normalize(placement.displayUUID) else {
+            return placement.lockToNotch
+                ? "Inactive for System primary. Saved lock is on; choosing a named monitor resets it to Off."
+                : "Choose a named monitor to enable notch lock."
+        }
+        guard let choice = choices.first(where: { $0.uuid == uuid }) else {
+            return placement.lockToNotch
+                ? "Inactive: monitor disconnected. Lock resumes when its measured notch is available."
+                : "Inactive: monitor disconnected. Lock needs a connected monitor with a measured notch."
+        }
+        guard choice.hasNotch else {
+            return placement.lockToNotch
+                ? "Inactive: no camera-safe notch measured on this monitor. Lock choice is kept."
+                : "Inactive: no camera-safe notch measured on this monitor."
+        }
+        return placement.lockToNotch
+            ? "Enabled: locks to this monitor's measured notch."
+            : "Off: enable to lock to this monitor's measured notch."
+    }
 
     func monitorOptions(choices: [PanelDisplayChoice]) -> [PlacementMonitorOption] {
         PlacementMonitorOption.options(selected: placement.displayUUID, choices: choices)

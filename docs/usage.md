@@ -38,8 +38,9 @@ Open **Settings → Display → Panel placement** and use the **Monitor** dropdo
 - If the pinned monitor is disconnected, it stays listed as **Disconnected monitor** and your choice is kept. The panel temporarily uses the System primary display and moves back when that monitor reconnects.
 - By default, a position you set with **Option-drag** overrides the configured monitor. **Reset position** clears only that override; saving a different monitor also clears it unless the new selection activates notch lock. Changing only the lock toggle preserves the saved position.
 - **Lock to selected monitor's notch** is optional and **off by default**, including after upgrading. When the selected monitor is connected and macOS reports valid notch measurements, the panel attaches to that notch, ignores (but preserves) your saved manual position, and blocks Option-drag movement and saving. Turning the lock off restores the saved position.
-- The lock requires a named Monitor selection, not **System primary**, and never prefers some other notched screen. If the selected display is disconnected, or the target has no usable notch measurements, the existing manual/fallback behavior applies. Reconnecting the selected notched display restores the lock. No camera dimensions are guessed.
-- Display changes, wake, screens waking and Space changes cancel frame animation and re-evaluate placement immediately and once more after one second; the open Settings monitor list refreshes too.
+- **System primary** disables the lock toggle and shows an explanation. A saved On value is preserved but inactive; choosing a named monitor from System primary starts the lock at **Off**, so enable it explicitly if wanted.
+- For a named monitor, the hint shows **Off**, **Enabled**, or why the lock is **Inactive**. A disconnected display or absent/incomplete notch measurements leave the lock choice intact but inactive, so existing manual/fallback placement applies. The lock never prefers another notched screen; it resumes on the selected display only when connected with usable notch measurements. No camera dimensions are guessed.
+- Hardware sleep/wake recovery has not been verified.
 - Monitor and lock choices are app-wide (not per omp profile), staged until **Save & Apply**. Cancel discards both; a failed save applies neither. macOS display settings are never changed.
 
 ## Updates

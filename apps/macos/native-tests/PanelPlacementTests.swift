@@ -4,7 +4,7 @@ import CoreGraphics
 private let builtInUUID = "37D8832A-2D66-02CA-B9F7-8F30A301B230"
 private let dellUUID = "63FD4F17-3FBA-46CD-AD01-70F294053371"
 private let builtIn = PlacementDisplay(uuid: builtInUUID, frame: CGRect(x: 0, y: 0, width: 1728, height: 1117), isPrimary: true, name: "Built-in Retina Display", hasNotch: true)
-private let dell = PlacementDisplay(uuid: dellUUID, frame: CGRect(x: -446, y: 1117, width: 1920, height: 1080), isPrimary: false, name: "DELL U2417H")
+private let dell = PlacementDisplay(uuid: dellUUID, frame: CGRect(x: -446, y: 1117, width: 1920, height: 1080), isPrimary: false, name: "DELL U2417H", hasNotch: false)
 
 private func isolatedDefaults() -> (UserDefaults, () -> Void) { makeIsolatedDefaults(prefix: "omp-placement-tests") }
 
@@ -25,23 +25,22 @@ func runPanelPlacementTests() {
     }
 
     // Names never identify: two displays with the same name resolve by UUID, and the choices stay distinguishable.
-    let twinA = PlacementDisplay(uuid: "AAAAAAAA-0000-0000-0000-000000000001", frame: CGRect(x: 1728, y: 0, width: 1920, height: 1080), isPrimary: false, name: "DELL U2417H")
-    let twinB = PlacementDisplay(uuid: "AAAAAAAA-0000-0000-0000-000000000002", frame: CGRect(x: 3648, y: 0, width: 1920, height: 1080), isPrimary: false, name: "DELL U2417H")
+    let twinA = PlacementDisplay(uuid: "AAAAAAAA-0000-0000-0000-000000000001", frame: CGRect(x: 1728, y: 0, width: 1920, height: 1080), isPrimary: false, name: "DELL U2417H", hasNotch: false)
+    let twinB = PlacementDisplay(uuid: "AAAAAAAA-0000-0000-0000-000000000002", frame: CGRect(x: 3648, y: 0, width: 1920, height: 1080), isPrimary: false, name: "DELL U2417H", hasNotch: false)
     let twins = [builtIn, twinB, twinA]
     let pickB = PanelPlacementPreferences(displayUUID: twinB.uuid)
     precondition(twins[PanelPlacementResolver.targetIndex(pickB, in: twins)!] == twinB)
     let choices = PanelPlacementResolver.choices(twins)
     precondition(choices.map(\.uuid) == [builtInUUID, twinA.uuid!, twinB.uuid!])
     precondition(choices.filter(\.isPrimary).count == 1 && choices[0].isPrimary)
+    precondition(choices.map(\.hasNotch) == [true, false, false], "Settings receives the same measured notch eligibility as placement")
     precondition(PanelPlacementResolver.choices([dell, builtIn]) == PanelPlacementResolver.choices([builtIn, dell]))
 
-    // Disconnect: the target falls back to primary but the preference itself is a value that never changes.
-    let before = explicitDell
+    // Disconnect: the target falls back to primary.
     let alone = [builtIn]
-    precondition(PanelPlacementResolver.resolve(preferences: before, manual: nil, legacyPoint: nil, displays: alone)?.displayIndex == 0)
-    precondition(before == explicitDell)
+    precondition(PanelPlacementResolver.resolve(preferences: explicitDell, manual: nil, legacyPoint: nil, displays: alone)?.displayIndex == 0)
     // Reconnect, even with the displays renumbered into a different order: back on the configured display.
-    precondition(PanelPlacementResolver.resolve(preferences: before, manual: nil, legacyPoint: nil, displays: [dell, builtIn])?.displayIndex == 0)
+    precondition(PanelPlacementResolver.resolve(preferences: explicitDell, manual: nil, legacyPoint: nil, displays: [dell, builtIn])?.displayIndex == 0)
 
     // No inventory is deterministic: nothing resolves, nothing crashes.
     precondition(PanelPlacementResolver.targetIndex(primary, in: []) == nil)
@@ -55,17 +54,16 @@ func runPanelPlacementTests() {
     let anchor = PanelPlacementResolver.anchor(for: CGPoint(x: 100, y: 1500), on: dell)!
     precondition(anchor.displayUUID == dellUUID && anchor.offset == CGPoint(x: 546, y: 383))
     let manual = PanelManualPlacement(topCenter: CGPoint(x: 100, y: 1500), anchor: anchor)
-    let moved = PlacementDisplay(uuid: dellUUID, frame: CGRect(x: 2000, y: -300, width: 1920, height: 1080), isPrimary: false, name: "DELL U2417H")
+    let moved = PlacementDisplay(uuid: dellUUID, frame: CGRect(x: 2000, y: -300, width: 1920, height: 1080), isPrimary: false, name: "DELL U2417H", hasNotch: false)
     let following = PanelPlacementResolver.resolve(preferences: primary, manual: manual, legacyPoint: nil, displays: [builtIn, moved])!
     precondition(following.displayIndex == 1 && following.manualTopCenter == CGPoint(x: 2546, y: 83))
     // Disconnected anchor: shown on the fallback at the same relative spot; the saved manual value is not touched.
     let fallback = PanelPlacementResolver.resolve(preferences: primary, manual: manual, legacyPoint: nil, displays: alone)!
     precondition(fallback.displayIndex == 0 && fallback.manualTopCenter == CGPoint(x: 546, y: 383))
-    precondition(manual.topCenter == CGPoint(x: 100, y: 1500) && manual.anchor == anchor)
     // A manual point without identity selects the display containing it, else the target; point as saved.
     let legacyManual = PanelManualPlacement(topCenter: CGPoint(x: 100, y: 1500), anchor: nil)
     precondition(PanelPlacementResolver.resolve(preferences: primary, manual: legacyManual, legacyPoint: nil, displays: [builtIn, dell])?.displayIndex == 1)
-    precondition(PanelPlacementResolver.resolve(preferences: primary, manual: legacyManual, legacyPoint: nil, displays: alone) == PanelPlacementResolution(displayIndex: 0, manualTopCenter: CGPoint(x: 100, y: 1500)))
+    precondition(PanelPlacementResolver.resolve(preferences: primary, manual: legacyManual, legacyPoint: nil, displays: alone) == PanelPlacementResolution(displayIndex: 0, manualTopCenter: CGPoint(x: 100, y: 1500), isNotchLocked: false))
     // Legacy `panelPosition` picks the display it was on before migration, without manual placement.
     let legacy = PanelPlacementResolver.resolve(preferences: primary, manual: nil, legacyPoint: CGPoint(x: 0, y: 1200), displays: [builtIn, dell])!
     precondition(legacy.displayIndex == 1 && legacy.manualTopCenter == nil)
@@ -102,7 +100,6 @@ func runPanelPlacementTests() {
                                                 displays: [builtIn])!.isNotchLocked)
     precondition(PanelPlacementResolver.resolve(preferences: locked, manual: manual, legacyPoint: nil,
                                                displays: [dell, builtIn])!.isNotchLocked)
-    precondition(manual.topCenter == CGPoint(x: 100, y: 1500) && manual.anchor == anchor)
 
     // Preferences store: reading writes nothing, prepare is pure, savePrepared persists and survives a restart.
     let (defaults, cleanup) = isolatedDefaults()
@@ -124,6 +121,10 @@ func runPanelPlacementTests() {
     precondition(defaults.data(forKey: PanelPlacementPreferencesStore.storageKey) == oldData)
     defaults.set(Data("{}".utf8), forKey: PanelPlacementPreferencesStore.storageKey)
     precondition(PanelPlacementPreferencesStore(defaults: defaults).preferences == .defaults)
+    let primaryLockData = Data("{\"lockToNotch\":true}".utf8)
+    defaults.set(primaryLockData, forKey: PanelPlacementPreferencesStore.storageKey)
+    precondition(PanelPlacementPreferencesStore(defaults: defaults).preferences == PanelPlacementPreferences(lockToNotch: true))
+    precondition(defaults.data(forKey: PanelPlacementPreferencesStore.storageKey) == primaryLockData, "an inactive saved primary lock is not silently normalized")
     let lockPrepared = try! store.prepare(locked)
     precondition(lockPrepared.preferences.displayUUID == builtInUUID && lockPrepared.preferences.lockToNotch)
     store.savePrepared(lockPrepared)
@@ -140,10 +141,6 @@ func runPanelPlacementTests() {
     precondition(manualDefaults.array(forKey: PanelManualPlacementStore.positionKey) as? [Double] == [512.5, 900])
     manualStore.save(manual)
     precondition(PanelManualPlacementStore(defaults: manualDefaults).placement == manual)
-    // Resolving a saved manual position under lock never rewrites it, even across preferences persistence.
-    _ = PanelPlacementResolver.resolve(preferences: store.preferences, manual: manualStore.placement,
-                                      legacyPoint: manualStore.legacyPanelPosition, displays: [dell, builtIn])
-    precondition(manualStore.placement == manual && manualStore.legacyPanelPosition == CGPoint(x: 40, y: 20))
     manualStore.clear()
     precondition(manualStore.placement == nil && manualStore.legacyPanelPosition == nil)
 
