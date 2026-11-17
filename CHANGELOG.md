@@ -1,10 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.1.0
 
 - Add an optional, default-off notch lock for the selected panel monitor. Preserve manual placement while locked, disable Option-drag only on that connected notched target, and keep monitor/fallback behavior unchanged otherwise.
 - Disable the notch-lock toggle for System primary and explain why; choosing a named monitor from System primary starts the lock at Off. Show inactive reasons for disconnected or unmeasured-notch targets while preserving the lock choice and existing manual/fallback placement.
-- Hardware sleep/wake recovery has not been verified.
 
 ## 1.0.0
 
