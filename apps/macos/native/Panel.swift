@@ -4,10 +4,12 @@ final class UsagePanel: NSPanel {
     var draggingChanged: ((Bool) -> Void)?
     var dragTo: ((NSPoint) -> Void)?
     var dragAnchor: (() -> NSPoint?)?
+    var canDrag: (() -> Bool)?
     private var dragStart: (NSPoint, NSPoint)?
     override var canBecomeKey: Bool { true }
     override func mouseDown(with event: NSEvent) {
         if event.modifierFlags.contains(.option) {
+            guard canDrag?() ?? true else { return }
             dragStart = (NSEvent.mouseLocation, dragAnchor?() ?? NSPoint(x: frame.midX, y: frame.maxY)); draggingChanged?(true)
         }
         else { super.mouseDown(with: event) }
@@ -19,6 +21,11 @@ final class UsagePanel: NSPanel {
     }
     override func mouseUp(with event: NSEvent) {
         if dragStart != nil { dragStart = nil; draggingChanged?(false) } else { super.mouseUp(with: event) }
+    }
+    func cancelDragging() {
+        guard dragStart != nil else { return }
+        dragStart = nil
+        draggingChanged?(false)
     }
 }
 private final class DockFrameAnimation: NSAnimation {
@@ -85,6 +92,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private var manualPlacement: PanelManualPlacement?
     private var hiddenForPlacement = false
     private var frameAnimation: DockFrameAnimation?
+    private var placementReevaluation: DispatchWorkItem?
     private var animationTarget: DockLayout?
     private var animationTargetExpansion: CGFloat = 0
     private var animationTargetBlend: CGFloat = 0
@@ -167,10 +175,15 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         panel.draggingChanged = { [weak self] active in self?.draggingChanged(active) }
         panel.dragTo = { [weak self] origin in self?.dragTo(origin) }
         panel.dragAnchor = { [weak self] in self?.dragStartAnchor() }
+        panel.canDrag = { [weak self] in self.map { !$0.isNotchLockActive } ?? false }
         manualPlacement = manualStore.placement
         bindCollector()
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sessionBecameActive), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screensChanged), name: name, object: nil)
+        }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 53, let self = self,
                   event.window === self.panel, self.interaction.presentation == .expanded,
@@ -200,6 +213,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         generalSettings.close()
         cancelHover()
         cancelFrameAnimation()
+        placementReevaluation?.cancel(); placementReevaluation = nil
         refreshTimer?.invalidate(); clockTimer?.invalidate()
         removeEventMonitors()
         NotificationCenter.default.removeObserver(self)
@@ -211,6 +225,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         refreshTimer?.invalidate(); clockTimer?.invalidate()
+        placementReevaluation?.cancel()
     }
     private func removeEventMonitors() {
         for monitor in [keyMonitor, localPointerMonitor, globalPointerMonitor].compactMap({ $0 }) {
@@ -219,6 +234,19 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         keyMonitor = nil; localPointerMonitor = nil; globalPointerMonitor = nil
     }
     @objc private func screensChanged() {
+        placementReevaluation?.cancel()
+        reevaluatePlacement()
+        let work = DispatchWorkItem { [weak self] in
+            self?.placementReevaluation = nil
+            self?.reevaluatePlacement()
+        }
+        placementReevaluation = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+    private func reevaluatePlacement() {
+        cancelHover()
+        cancelFrameAnimation()
+        panel.cancelDragging()
         generalSettings.updateDisplays(PanelPlacementResolver.choices(PanelScreenInventory.current().displays))
         positionPanel()
     }
@@ -268,11 +296,14 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
             commit.placement.normalized == placementStore.preferences ? nil : try placementStore.prepare(commit.placement)
         try configStore.save(commit.config)
         for entry in staged { entry.store.savePrepared(entry.prepared) }
-        // Placement is app-wide and independent of the collector; a changed monitor supersedes a manual position.
+        // A lock toggle preserves manual intent; a monitor change retains it only under an active notch lock.
         let placementChanged = placementPrepared != nil
         if let placementPrepared {
+            let clearManual = PanelPlacementResolver.shouldClearManualPlacement(
+                from: placementStore.preferences, to: placementPrepared.preferences,
+                displays: PanelScreenInventory.current().displays)
             placementStore.savePrepared(placementPrepared)
-            manualStore.clear(); manualPlacement = nil
+            if clearManual { manualStore.clear(); manualPlacement = nil }
         }
         let committed = configStore.config
         if committed != config {
@@ -330,11 +361,6 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         updateSettingsCatalog()
         generalSettings.updateCatalog(result: result)
         renderHeader()
-    }
-    private func metrics(_ screen: NSScreen) -> DockScreenMetrics {
-        DockScreenMetrics(frame: screen.frame, visibleFrame: screen.visibleFrame, safeAreaTop: screen.safeAreaInsets.top,
-                          menuBarHeight: NSStatusBar.system.thickness, auxiliaryTopLeft: screen.auxiliaryTopLeftArea ?? .zero,
-                          auxiliaryTopRight: screen.auxiliaryTopRightArea ?? .zero)
     }
     private var freshness: String {
         if let error = transportError { return "Stale: \(error)" }
@@ -463,17 +489,19 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
     // The single placement policy for every trigger (render, refresh, hover, menu, display change, Settings save).
     // `commitManual` is true only while the user drags: that is the sole place the manual intent is written.
-    private func positionPanel(animated: Bool = false, commitManual: Bool = false) {
-        migrateLegacyPositionIfNeeded()
-        let inventory = PanelScreenInventory.current()
+    private func positionPanel(animated: Bool = false, commitManual: Bool = false,
+                               inventory: PanelScreenInventory = .current()) {
+        if !PanelPlacementResolver.isNotchLockActive(preferences: placementStore.preferences, displays: inventory.displays) {
+            migrateLegacyPositionIfNeeded()
+        }
         guard let resolution = PanelPlacementResolver.resolve(
             preferences: placementStore.preferences, manual: manualPlacement,
             legacyPoint: manualPlacement == nil ? manualStore.legacyPanelPosition : nil, displays: inventory.displays) else {
             cancelFrameAnimation(); panel.orderOut(nil); hiddenForPlacement = true; return
         }
         let screen = inventory.screens[resolution.displayIndex]
+        let screenMetrics = DockScreenMetrics(screen: screen)
         let manualTopCenter = resolution.manualTopCenter
-        let screenMetrics = metrics(screen)
         let bottom = max(screenMetrics.frame.minY, screenMetrics.visibleFrame.minY)
         let availableHeight = max(1, screenMetrics.frame.maxY - bottom)
         let slots = updateCompactPlan(capacities: DockGeometry.compactCapacities(screen: screenMetrics,
@@ -548,12 +576,12 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
             if expansion == 0 { updateInteractionMayHaveReleased() }
         }
         let display = inventory.displays[resolution.displayIndex]
-        if commitManual, var manual = manualPlacement {
+        if commitManual, !resolution.isNotchLocked, var manual = manualPlacement {
             let point = CGPoint(x: layout.frame.midX, y: layout.frame.maxY)
             manual.topCenter = point
             manual.anchor = PanelPlacementResolver.anchor(for: point, on: display)
             manualPlacement = manual; manualStore.save(manual)
-        } else if var manual = manualPlacement, manual.anchor == nil,
+        } else if !resolution.isNotchLocked, var manual = manualPlacement, manual.anchor == nil,
                   let anchor = PanelPlacementResolver.anchor(for: manual.topCenter, on: display) {
             // A pre-anchor position gains its display identity without moving: same point, now reconnect-safe.
             manual.anchor = anchor
@@ -683,8 +711,16 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         if active { positionPanel() } else { renderHeader(); updateInteractionMayHaveReleased() }
     }
     private func dragTo(_ origin: NSPoint) {
+        let inventory = PanelScreenInventory.current()
+        guard !PanelPlacementResolver.isNotchLockActive(preferences: placementStore.preferences, displays: inventory.displays) else {
+            panel.cancelDragging(); positionPanel(inventory: inventory); return
+        }
         manualPlacement = PanelManualPlacement(topCenter: origin, anchor: nil)
-        positionPanel(commitManual: true)
+        positionPanel(commitManual: true, inventory: inventory)
+    }
+    private var isNotchLockActive: Bool {
+        PanelPlacementResolver.isNotchLockActive(preferences: placementStore.preferences,
+                                               displays: PanelScreenInventory.current().displays)
     }
     // Where an Option-drag grabs the panel. Collapsed, the manual top-center is chosen so the grabbed wing's
     // controls keep their global position when the two wings become one contiguous floating row (no camera-gap

@@ -367,6 +367,23 @@ private func runUnifiedCompactDraftTests() {
     placed.selectMonitor(uuid: builtIn.uuid)
     precondition(placed.hasChanges(from: config, updatePolicy: .defaults, placement: .defaults))
 
+    let placementBaseline = placed.placement
+    placed.placement.lockToNotch = true
+    precondition(placed.hasChanges(from: config, updatePolicy: .defaults, placement: placementBaseline))
+    precondition(commit(placed)?.placement.lockToNotch == true && commit(placed)?.config == config)
+    precondition(commit(placed)?.compactChanges.isEmpty == true, "lock-only save leaves other preferences alone")
+    let lockedDraft = placed
+    _ = placed.monitorOptions(choices: [dell])
+    precondition(placed == lockedDraft, "display refresh preserves the staged lock and monitor")
+    placed.setText("invalid", for: .refreshSeconds)
+    precondition(commit(placed) == nil && placed.placement == lockedDraft.placement, "failed validation retains the lock draft")
+    placed.setText(Draft.format(config.refreshSeconds), for: .refreshSeconds)
+    precondition(commit(placed)?.placement == lockedDraft.placement)
+    let cancelled = Draft(config: config, placement: placementBaseline)
+    precondition(cancelled.placement == placementBaseline && !cancelled.placement.lockToNotch, "reopening after Cancel starts from committed preferences")
+    placed.placement.lockToNotch = false
+    precondition(!placed.hasChanges(from: config, updatePolicy: .defaults, placement: placementBaseline), "reverting lock removes dirty state")
+
     // Options: default first, connected names, selection marked; catalog refresh never changes the staged choice.
     let connected = placed.monitorOptions(choices: [builtIn, dell])
     precondition(connected.map(\.title) == ["System primary (Default)", "Built-in Retina Display", "DELL U2417H"])

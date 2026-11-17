@@ -3,7 +3,7 @@ import CoreGraphics
 
 private let builtInUUID = "37D8832A-2D66-02CA-B9F7-8F30A301B230"
 private let dellUUID = "63FD4F17-3FBA-46CD-AD01-70F294053371"
-private let builtIn = PlacementDisplay(uuid: builtInUUID, frame: CGRect(x: 0, y: 0, width: 1728, height: 1117), isPrimary: true, name: "Built-in Retina Display")
+private let builtIn = PlacementDisplay(uuid: builtInUUID, frame: CGRect(x: 0, y: 0, width: 1728, height: 1117), isPrimary: true, name: "Built-in Retina Display", hasNotch: true)
 private let dell = PlacementDisplay(uuid: dellUUID, frame: CGRect(x: -446, y: 1117, width: 1920, height: 1080), isPrimary: false, name: "DELL U2417H")
 
 private func isolatedDefaults() -> (UserDefaults, () -> Void) { makeIsolatedDefaults(prefix: "omp-placement-tests") }
@@ -70,6 +70,40 @@ func runPanelPlacementTests() {
     let legacy = PanelPlacementResolver.resolve(preferences: primary, manual: nil, legacyPoint: CGPoint(x: 0, y: 1200), displays: [builtIn, dell])!
     precondition(legacy.displayIndex == 1 && legacy.manualTopCenter == nil)
 
+    // Explicit target lock overrides both manual forms and legacy placement, without changing any saved intent.
+    let locked = PanelPlacementPreferences(displayUUID: builtInUUID.lowercased(), lockToNotch: true)
+    for displays in [[builtIn, dell], [dell, builtIn], [dell.withPrimary(true), builtIn.withPrimary(false)]] {
+        for saved in [manual, legacyManual] {
+            let resolution = PanelPlacementResolver.resolve(preferences: locked, manual: saved,
+                                                            legacyPoint: legacyManual.topCenter, displays: displays)!
+            precondition(displays[resolution.displayIndex].uuid == builtInUUID)
+            precondition(resolution.isNotchLocked && resolution.manualTopCenter == nil)
+        }
+        let legacyLocked = PanelPlacementResolver.resolve(preferences: locked, manual: nil,
+                                                          legacyPoint: legacyManual.topCenter, displays: displays)!
+        precondition(legacyLocked.isNotchLocked && displays[legacyLocked.displayIndex].uuid == builtInUUID)
+    }
+    let unlocked = PanelPlacementPreferences(displayUUID: builtInUUID)
+    precondition(PanelPlacementResolver.resolve(preferences: unlocked, manual: manual, legacyPoint: nil,
+                                               displays: [builtIn, dell])?.manualTopCenter == manual.topCenter)
+    // Nil UUID is never locked, even if primary is notched; an external selection never picks another notch.
+    for preferences in [PanelPlacementPreferences(lockToNotch: true),
+                        PanelPlacementPreferences(displayUUID: dellUUID, lockToNotch: true)] {
+        let resolution = PanelPlacementResolver.resolve(preferences: preferences, manual: manual,
+                                                        legacyPoint: nil, displays: [builtIn, dell])!
+        precondition(!resolution.isNotchLocked && resolution.manualTopCenter == manual.topCenter)
+    }
+    // Disconnect, an empty transient inventory, a notched fallback, and reconnect preserve the UUID and anchor.
+    precondition(PanelPlacementResolver.resolve(preferences: locked, manual: manual, legacyPoint: nil, displays: []) == nil)
+    let away = PanelPlacementResolver.resolve(preferences: locked, manual: manual, legacyPoint: nil, displays: [dell])!
+    precondition(!away.isNotchLocked && away.manualTopCenter == manual.topCenter)
+    let missing = PanelPlacementPreferences(displayUUID: "DISCONNECTED", lockToNotch: true)
+    precondition(!PanelPlacementResolver.resolve(preferences: missing, manual: manual, legacyPoint: nil,
+                                                displays: [builtIn])!.isNotchLocked)
+    precondition(PanelPlacementResolver.resolve(preferences: locked, manual: manual, legacyPoint: nil,
+                                               displays: [dell, builtIn])!.isNotchLocked)
+    precondition(manual.topCenter == CGPoint(x: 100, y: 1500) && manual.anchor == anchor)
+
     // Preferences store: reading writes nothing, prepare is pure, savePrepared persists and survives a restart.
     let (defaults, cleanup) = isolatedDefaults()
     defer { cleanup() }
@@ -83,6 +117,18 @@ func runPanelPlacementTests() {
     store.savePrepared(try! store.prepare(PanelPlacementPreferences(displayUUID: "   ")))
     precondition(PanelPlacementPreferencesStore(defaults: defaults).preferences == .defaults)
 
+    // Previous v1 payloads keep the selected monitor and default the new lock to false, without a write.
+    let oldData = Data("{\"displayUUID\":\"\(dellUUID.lowercased())\"}".utf8)
+    defaults.set(oldData, forKey: PanelPlacementPreferencesStore.storageKey)
+    precondition(PanelPlacementPreferencesStore(defaults: defaults).preferences == explicitDell)
+    precondition(defaults.data(forKey: PanelPlacementPreferencesStore.storageKey) == oldData)
+    defaults.set(Data("{}".utf8), forKey: PanelPlacementPreferencesStore.storageKey)
+    precondition(PanelPlacementPreferencesStore(defaults: defaults).preferences == .defaults)
+    let lockPrepared = try! store.prepare(locked)
+    precondition(lockPrepared.preferences.displayUUID == builtInUUID && lockPrepared.preferences.lockToNotch)
+    store.savePrepared(lockPrepared)
+    precondition(PanelPlacementPreferencesStore(defaults: defaults).preferences == locked.normalized)
+
     // Manual store: legacy startup preserves coordinates; clear removes every manual form.
     let (manualDefaults, manualCleanup) = isolatedDefaults()
     defer { manualCleanup() }
@@ -94,8 +140,69 @@ func runPanelPlacementTests() {
     precondition(manualDefaults.array(forKey: PanelManualPlacementStore.positionKey) as? [Double] == [512.5, 900])
     manualStore.save(manual)
     precondition(PanelManualPlacementStore(defaults: manualDefaults).placement == manual)
+    // Resolving a saved manual position under lock never rewrites it, even across preferences persistence.
+    _ = PanelPlacementResolver.resolve(preferences: store.preferences, manual: manualStore.placement,
+                                      legacyPoint: manualStore.legacyPanelPosition, displays: [dell, builtIn])
+    precondition(manualStore.placement == manual && manualStore.legacyPanelPosition == CGPoint(x: 40, y: 20))
     manualStore.clear()
     precondition(manualStore.placement == nil && manualStore.legacyPanelPosition == nil)
+
+    // Settings consumes this same save decision before adopting preferences and clearing manual storage.
+    // A checked lock is insufficient: the newly selected target must actually have a measurable notch.
+    let savedOnBuiltIn = PanelManualPlacement(
+        topCenter: CGPoint(x: 600, y: 800),
+        anchor: PanelManualPlacement.Anchor(displayUUID: builtInUUID, offset: CGPoint(x: 600, y: 800)))
+    let lockedBuiltIn = locked.normalized
+    let lockedDell = PanelPlacementPreferences(displayUUID: dellUUID, lockToNotch: true)
+    let lockedPrimary = PanelPlacementPreferences(lockToNotch: true)
+    let notchlessBuiltIn = PlacementDisplay(uuid: builtInUUID, frame: builtIn.frame, isPrimary: true,
+                                           name: builtIn.name, hasNotch: false)
+    let saveCases: [(name: String, previous: PanelPlacementPreferences, next: PanelPlacementPreferences,
+                     displays: [PlacementDisplay], clears: Bool, target: String, locked: Bool)] = [
+        ("checked external target", lockedBuiltIn, lockedDell, [builtIn, dell], true, dellUUID, false),
+        ("checked system primary", lockedBuiltIn, lockedPrimary,
+         [builtIn.withPrimary(false), dell.withPrimary(true)], true, dellUUID, false),
+        ("disconnected target with notched fallback", primary, missing, [builtIn, dell], true, builtInUUID, false),
+        ("target without notch measurements", explicitDell, lockedBuiltIn,
+         [notchlessBuiltIn, dell], true, builtInUUID, false),
+        ("select target and enable lock together", primary, lockedBuiltIn, [dell, builtIn], false, builtInUUID, true),
+        ("unlocked monitor change", primary, explicitDell, [builtIn, dell], true, dellUUID, false),
+        ("enable lock only", unlocked, lockedBuiltIn, [builtIn, dell], false, builtInUUID, true),
+        ("disable lock only", lockedBuiltIn, unlocked, [builtIn, dell], false, builtInUUID, false),
+        ("enable inactive lock only", explicitDell, lockedDell, [builtIn, dell], false, builtInUUID, false),
+        ("disable inactive lock only", lockedDell, explicitDell, [builtIn, dell], false, builtInUUID, false),
+    ]
+    for test in saveCases {
+        store.savePrepared(try! store.prepare(test.previous))
+        manualStore.save(savedOnBuiltIn)
+        manualDefaults.set([40.0, 20.0], forKey: PanelManualPlacementStore.legacyKey)
+        let next = try! store.prepare(test.next)
+        let clearManual = PanelPlacementResolver.shouldClearManualPlacement(
+            from: store.preferences, to: next.preferences, displays: test.displays)
+        precondition(clearManual == test.clears, test.name)
+        store.savePrepared(next)
+        if clearManual { manualStore.clear() }
+        let reloadedManual = PanelManualPlacementStore(defaults: manualDefaults)
+        precondition(reloadedManual.placement == (test.clears ? nil : savedOnBuiltIn), test.name)
+        precondition(reloadedManual.legacyPanelPosition == (test.clears ? nil : CGPoint(x: 40, y: 20)), test.name)
+        let preferences = PanelPlacementPreferencesStore(defaults: defaults).preferences
+        precondition(preferences == test.next.normalized, test.name)
+        let resolution = PanelPlacementResolver.resolve(
+            preferences: preferences, manual: reloadedManual.placement,
+            legacyPoint: reloadedManual.legacyPanelPosition, displays: test.displays)!
+        precondition(test.displays[resolution.displayIndex].uuid == test.target, test.name)
+        precondition(resolution.isNotchLocked == test.locked, test.name)
+        precondition(resolution.manualTopCenter == (test.clears || test.locked ? nil : savedOnBuiltIn.topCenter), test.name)
+        if test.locked {
+            let restored = PanelPlacementResolver.resolve(
+                preferences: PanelPlacementPreferences(displayUUID: preferences.displayUUID),
+                manual: reloadedManual.placement, legacyPoint: reloadedManual.legacyPanelPosition,
+                displays: test.displays)!
+            precondition(restored.manualTopCenter == savedOnBuiltIn.topCenter, test.name)
+        }
+    }
+    precondition(PanelPlacementResolver.shouldClearManualPlacement(from: primary, to: lockedBuiltIn, displays: []))
+    precondition(!PanelPlacementResolver.shouldClearManualPlacement(from: unlocked, to: lockedBuiltIn, displays: []))
     // Corrupt values read as absent rather than as a bogus position.
     manualDefaults.set([Double.nan, 1.0], forKey: PanelManualPlacementStore.positionKey)
     precondition(manualStore.placement == nil)
@@ -103,6 +210,6 @@ func runPanelPlacementTests() {
 
 private extension PlacementDisplay {
     func withPrimary(_ value: Bool) -> PlacementDisplay {
-        PlacementDisplay(uuid: uuid, frame: frame, isPrimary: value, name: name)
+        PlacementDisplay(uuid: uuid, frame: frame, isPrimary: value, name: name, hasNotch: hasNotch)
     }
 }

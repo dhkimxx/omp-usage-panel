@@ -7,7 +7,7 @@
 - **All** and the provider list come from the full collected catalog, including providers hidden from the summary cards or currently unavailable. These selections only change what is displayed and never change credentials.
 - The **Providers** and **Account** pickers are keyboard-friendly lists (**↑/↓**, **Home/End**, **Return/Space**); **Escape** or an outside click closes only the list.
 - **Options** (or right-click): Settings…, refresh, open data folder, reset position, quit.
-- **Option-drag** moves the panel; **Reset position** restores automatic placement on the configured monitor (it does not change the monitor choice).
+- **Option-drag** moves the panel unless notch lock is active; **Reset position** restores automatic placement on the configured monitor (it does not change the monitor choice).
 - The summary is the highest single observed utilization, not an account total. Unknown values are not zero.
 
 **Quit** does not immediately restart the app. To reopen it, or to apply manual edits made to `config.json` outside the app:
@@ -36,8 +36,11 @@ Open **Settings → Display → Panel placement** and use the **Monitor** dropdo
 - **System primary (Default)** keeps the panel on the display macOS marks as primary (the one with the menu bar). It does not follow the pointer, the active window or keyboard focus. If you change the primary display in macOS, the panel follows that change.
 - A named monitor pins the panel to that physical display, even when it is not the primary one. Monitors are remembered by display UUID; choosing the primary display explicitly differs from the default because it keeps that monitor if the primary changes.
 - If the pinned monitor is disconnected, it stays listed as **Disconnected monitor** and your choice is kept. The panel temporarily uses the System primary display and moves back when that monitor reconnects.
-- A position you set with **Option-drag** overrides the configured monitor. **Reset position** clears only that override; saving a different monitor in Settings also clears it.
-- The choice is app-wide (not per omp profile), staged until **Save & Apply**. macOS display settings are never changed.
+- By default, a position you set with **Option-drag** overrides the configured monitor. **Reset position** clears only that override; saving a different monitor also clears it unless the new selection activates notch lock. Changing only the lock toggle preserves the saved position.
+- **Lock to selected monitor's notch** is optional and **off by default**, including after upgrading. When the selected monitor is connected and macOS reports valid notch measurements, the panel attaches to that notch, ignores (but preserves) your saved manual position, and blocks Option-drag movement and saving. Turning the lock off restores the saved position.
+- The lock requires a named Monitor selection, not **System primary**, and never prefers some other notched screen. If the selected display is disconnected, or the target has no usable notch measurements, the existing manual/fallback behavior applies. Reconnecting the selected notched display restores the lock. No camera dimensions are guessed.
+- Display changes, wake, screens waking and Space changes cancel frame animation and re-evaluate placement immediately and once more after one second; the open Settings monitor list refreshes too.
+- Monitor and lock choices are app-wide (not per omp profile), staged until **Save & Apply**. Cancel discards both; a failed save applies neither. macOS display settings are never changed.
 
 ## Updates
 

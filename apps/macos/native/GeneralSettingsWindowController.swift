@@ -110,6 +110,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
     private let paceToggle = SettingsToggle(title: "Show elapsed-period pace markers")
     private let monitorButton = SettingsDropdownButton()
     private let monitorHintLabel = NSTextField(wrappingLabelWithString: "")
+    private let notchLockToggle = SettingsToggle(title: "Lock to selected monitor's notch")
     private let modeControl = SettingsSegmentedControl(labels: ["Automatic", "Custom"])
     private let modeHint = NSTextField(wrappingLabelWithString: "")
     private let observedLabel = NSTextField(wrappingLabelWithString: "")
@@ -623,6 +624,9 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         monitorButton.title = PlacementMonitorOption.systemPrimaryTitle
         style(secondary: monitorHintLabel)
         monitorHintLabel.setAccessibilityIdentifier("placement.monitor.hint")
+        notchLockToggle.target = self
+        notchLockToggle.action = #selector(notchLockChanged)
+        notchLockToggle.setAccessibilityIdentifier("placement.lockToNotch")
         let titleLabel = makeLabel("Monitor")
         titleLabel.widthAnchor.constraint(equalToConstant: 150).isActive = true
         monitorButton.widthAnchor.constraint(equalToConstant: 280).isActive = true
@@ -630,7 +634,8 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
             sectionTitle("Panel placement"),
             horizontal([titleLabel, monitorButton, flexibleSpacer()], spacing: 6),
             monitorHintLabel,
-            hint("Option-drag overrides placement. Reset position returns to the selected monitor."),
+            notchLockToggle,
+            hint("Choose a named monitor to lock to its measured notch (System primary is not locked). While locked, Option-drag is disabled and your saved position is kept but ignored. Otherwise Option-drag overrides placement; Reset position clears that override."),
         ], spacing: 10)
     }
 
@@ -1401,6 +1406,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
     // MARK: Actions
 
     @objc private func paceChanged() { draft?.showPace = paceToggle.state == .on }
+    @objc private func notchLockChanged() { draft?.placement.lockToNotch = notchLockToggle.state == .on }
 
     @objc private func monitorPressed() {
         let controller = DropdownPopupController.shared
@@ -1435,6 +1441,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
         monitorButton.setAccessibilityValue(monitorButton.title)
         monitorButton.toolTip = monitorButton.title
         monitorHintLabel.stringValue = draft.monitorHint(choices: displayChoices)
+        notchLockToggle.state = draft.placement.lockToNotch ? .on : .off
         if DropdownPopupController.shared.isPresented(for: monitorButton) { presentMonitorChoices() }
     }
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add an optional, default-off notch lock for the selected panel monitor. Preserve manual placement while locked, disable Option-drag only on that connected notched target, and keep monitor/fallback behavior unchanged otherwise.
+- Re-evaluate panel placement and Settings display choices immediately and after a cancellable one-second delay on wake, screen and Space changes, cancelling obsolete frame animations.
+
 ## 1.0.0
 
 First public release.

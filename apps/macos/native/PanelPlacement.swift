@@ -14,13 +14,25 @@ enum PanelDisplayIdentity {
 
 struct PanelPlacementPreferences: Codable, Equatable {
     var displayUUID: String?
+    var lockToNotch: Bool
 
-    init(displayUUID: String? = nil) { self.displayUUID = displayUUID }
+    init(displayUUID: String? = nil, lockToNotch: Bool = false) {
+        self.displayUUID = displayUUID
+        self.lockToNotch = lockToNotch
+    }
+
+    private enum CodingKeys: String, CodingKey { case displayUUID, lockToNotch }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        displayUUID = try values.decodeIfPresent(String.self, forKey: .displayUUID)
+        lockToNotch = try values.decodeIfPresent(Bool.self, forKey: .lockToNotch) ?? false
+    }
 
     static let defaults = PanelPlacementPreferences()
 
     var normalized: PanelPlacementPreferences {
-        PanelPlacementPreferences(displayUUID: PanelDisplayIdentity.normalize(displayUUID))
+        PanelPlacementPreferences(displayUUID: PanelDisplayIdentity.normalize(displayUUID), lockToNotch: lockToNotch)
     }
 }
 
@@ -78,11 +90,14 @@ struct PlacementDisplay: Equatable {
     let isPrimary: Bool
     let name: String
 
-    init(uuid: String?, frame: CGRect, isPrimary: Bool, name: String) {
+    /// True only when measured screen metrics support camera-safe notch attachment.
+    let hasNotch: Bool
+    init(uuid: String?, frame: CGRect, isPrimary: Bool, name: String, hasNotch: Bool = false) {
         self.uuid = PanelDisplayIdentity.normalize(uuid)
         self.frame = frame
         self.isPrimary = isPrimary
         self.name = name
+        self.hasNotch = hasNotch
     }
 }
 
@@ -152,6 +167,13 @@ struct PanelPlacementResolution: Equatable {
     let displayIndex: Int
     /// Effective global top-center for the geometry; nil selects automatic placement. Never persisted.
     let manualTopCenter: CGPoint?
+    let isNotchLocked: Bool
+
+    init(displayIndex: Int, manualTopCenter: CGPoint?, isNotchLocked: Bool = false) {
+        self.displayIndex = displayIndex
+        self.manualTopCenter = manualTopCenter
+        self.isNotchLocked = isNotchLocked
+    }
 }
 
 enum PanelPlacementResolver {
@@ -177,9 +199,26 @@ enum PanelPlacementResolver {
         return primaryIndex(in: displays)
     }
 
+    /// Lock only the configured target, never a disconnected target's fallback or some other notched display.
+    static func isNotchLockActive(preferences: PanelPlacementPreferences, displays: [PlacementDisplay]) -> Bool {
+        guard preferences.lockToNotch, let uuid = PanelDisplayIdentity.normalize(preferences.displayUUID),
+              let target = targetIndex(preferences, in: displays) else { return false }
+        return displays[target].uuid == uuid && displays[target].hasNotch
+    }
+
+    /// A monitor change discards manual intent unless the new target actually activates notch lock.
+    /// Toggling only the lock never clears the saved position.
+    static func shouldClearManualPlacement(from previous: PanelPlacementPreferences, to next: PanelPlacementPreferences,
+                                          displays: [PlacementDisplay]) -> Bool {
+        previous.displayUUID != next.displayUUID && !isNotchLockActive(preferences: next, displays: displays)
+    }
+
     static func resolve(preferences: PanelPlacementPreferences, manual: PanelManualPlacement?, legacyPoint: CGPoint?,
                         displays: [PlacementDisplay]) -> PanelPlacementResolution? {
         guard let target = targetIndex(preferences, in: displays) else { return nil }
+        if isNotchLockActive(preferences: preferences, displays: displays) {
+            return PanelPlacementResolution(displayIndex: target, manualTopCenter: nil, isNotchLocked: true)
+        }
         if let manual {
             if let anchor = manual.anchor {
                 if let index = displays.firstIndex(where: { $0.uuid == anchor.displayUUID }) {
