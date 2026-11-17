@@ -268,6 +268,8 @@ struct GeneralSettingsDraft: Equatable {
     /// The configuration's legacy Node path: no longer user-editable (every Node process runs from the bundled
     /// runtime), carried through unchanged so Settings save preserves it exactly.
     let nodePath: String
+    /// File-based opt-ins are configured outside Settings and must survive every Save unchanged.
+    let externalSources: [ExternalSource]
     var ompPath: String
     var profile: String
     var refreshSeconds: String
@@ -295,6 +297,7 @@ struct GeneralSettingsDraft: Equatable {
         self.placement = placement
         version = config.version
         nodePath = config.nodePath
+        externalSources = config.externalSources
         ompPath = config.ompPath
         profile = config.profile
         refreshSeconds = Self.format(config.refreshSeconds)
@@ -318,7 +321,7 @@ struct GeneralSettingsDraft: Equatable {
     func hasChanges(from config: PanelConfig, updatePolicy committedPolicy: UpdatePolicy, placement committedPlacement: PanelPlacementPreferences = .defaults) -> Bool {
         let base = GeneralSettingsDraft(config: config, updatePolicy: committedPolicy, placement: committedPlacement)
         func values(_ rows: [Row]) -> [[String]] { rows.map { [$0.key, $0.value] } }
-        return nodePath != base.nodePath || ompPath != base.ompPath || profile != base.profile
+        return nodePath != base.nodePath || externalSources != base.externalSources || ompPath != base.ompPath || profile != base.profile
             || refreshSeconds != base.refreshSeconds || cacheMinutes != base.cacheMinutes
             || timeoutSeconds != base.timeoutSeconds || warnPercent != base.warnPercent
             || criticalPercent != base.criticalPercent || showPace != base.showPace
@@ -508,7 +511,7 @@ struct GeneralSettingsDraft: Equatable {
         let config = PanelConfig(version: version, nodePath: nodePath, ompPath: ompPath, profile: profile,
                                  refreshSeconds: refresh, cacheMinutes: cache, timeoutSeconds: timeout,
                                  providers: providers, labels: labels, metrics: metrics,
-                                 warnPercent: warn, criticalPercent: critical, showPace: showPace)
+                                 warnPercent: warn, criticalPercent: critical, showPace: showPace, externalSources: externalSources)
         do { try config.validate() }
         catch let error as PanelConfigError {
             if case .invalid(let key, let rule) = error {

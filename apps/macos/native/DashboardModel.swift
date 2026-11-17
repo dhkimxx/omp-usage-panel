@@ -54,6 +54,7 @@ enum DashboardModel {
         case "cache": source = "Cached"
         case "stale": source = "Stale data"
         case "unavailable": source = "Unavailable"
+        case "partial": source = "Partial data"
         case .some(let name): source = "Source: \(name)"
         case .none: source = "Waiting for usage data"
         }
@@ -64,6 +65,13 @@ enum DashboardModel {
         let status = statusParts.joined(separator: " · ")
         let sourceIssue = !issue.isEmpty || result?.source == "stale" || result?.source == "unavailable" || !(result?.error ?? "").isEmpty
         let cards = (result?.summaries ?? []).map { summary in
+            let providerSource = result?.source(for: summary.provider)
+            let providerIssue = providerSource.map { $0.source == "stale" || $0.source == "unavailable" || !($0.error ?? "").isEmpty } ?? sourceIssue
+            let providerStatus = providerSource.map {
+                let name = $0.source == "stale" ? "Stale data" : $0.source == "unavailable" ? "Unavailable" : $0.source == "cache" ? "Cached" : issue.isEmpty ? "Live" : "Last successful snapshot"
+                return [name, collecting ? "Refreshing…" : nil, issue.isEmpty ? nil : issue, $0.error]
+                    .compactMap { $0 }.joined(separator: " · ")
+            } ?? status
             // Summary selection is authoritative. Never borrow a different account or limit's window.
             let account = result?.snapshot?.accounts.first {
                 $0.provider == summary.provider && $0.id == summary.accountId
@@ -78,7 +86,7 @@ enum DashboardModel {
                 context = account?.plan ?? account?.label ?? summary.accountLabel ?? "Account unavailable"
             }
             let unavailable = result?.snapshot?.unavailable.filter { $0.provider == summary.provider } ?? []
-            var details = ["\(summary.label): \(summary.value)", "Metric: \(metric)", status]
+            var details = ["\(summary.label): \(summary.value)", "Metric: \(metric)", providerStatus]
             if let account = account {
                 details.append("Account: \(account.label) (\(account.id))")
                 if let plan = account.plan { details.append("Plan: \(plan)") }
@@ -103,7 +111,8 @@ enum DashboardModel {
                 details.append("Selected metric data unavailable · Reset unavailable")
             }
             if summary.accountCount > 1 { details.append("\(summary.accountCount) accounts") }
-            if let capturedAt = result?.snapshot?.capturedAt, let captured = timestamp(capturedAt) {
+            let capturedAt = providerSource == nil ? result?.snapshot?.capturedAt : providerSource?.capturedAt
+            if let capturedAt, let captured = timestamp(capturedAt) {
                 details.append("Snapshot: \(captured)")
             }
             details.append(contentsOf: summary.notes)
@@ -111,7 +120,7 @@ enum DashboardModel {
             return DashboardCard(provider: summary.provider, label: summary.label, value: summary.value,
                                  severity: summary.severity, percent: summary.percent, metric: metric,
                                  context: context, tooltip: details.joined(separator: "\n"), window: window,
-                                 showPace: showPace, hasIssue: sourceIssue || summary.percent == nil ||
+                                 showPace: showPace, hasIssue: !issue.isEmpty || providerIssue || summary.percent == nil ||
                                     summary.severity == "unknown" || summary.severity == "unavailable" ||
                                     summary.severity == "error" || !unavailable.isEmpty)
         }

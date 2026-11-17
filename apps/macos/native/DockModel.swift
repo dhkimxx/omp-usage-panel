@@ -455,7 +455,7 @@ enum DockPointerPolicy {
 enum CompactMark {
     private static let rules: [(needle: String, mark: String)] = [
         ("codex", "CX"), ("opencodego", "GO"), ("minimax", "MM"), ("commandcode", "CC"),
-        ("mistral", "MI"), ("anthropic", "AN"), ("claude", "AN")
+        ("mistral", "MI"), ("anthropic", "AN"), ("claude", "AN"), ("antigravity", "AG")
     ]
 
     private static func normalized(_ text: String) -> String {

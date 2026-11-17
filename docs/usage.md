@@ -29,6 +29,14 @@ Open **Settings → Display → Compact view** to choose which providers appear,
 - Without a notch (or when the panel is moved), rings form one contiguous capsule below the menu bar, left group then right group, with no camera gap.
 - Screen bounds may reduce the effective cap. App and status-menu occupancy is not detected; reduce the count or change sides if menus overlap.
 
+### External providers
+
+A separately installed exporter can contribute quota through an opt-in JSON file; see [configuration](configuration.md#external-snapshot-files-opt-in). It appears in the existing provider picker, cards and compact selection, without a separate layout. Antigravity's default label is **Antigravity** and its compact mark is **AG**.
+
+**Refresh** re-reads configured files but never runs an exporter or refreshes its provider's credentials. Antigravity's passive statusline exporter writes only when the official CLI invokes its callback; an idle CLI therefore eventually produces **Stale data**. A callback observes quota supplied by the CLI, not a guaranteed new backend request. OMP profile changes do not switch the CLI's active account.
+
+Provider tooltips and details show the source's own capture/fetch times and stale/unavailable status. A **Partial data** header means another source failed while some data remains usable; healthy provider cards are not marked stale because of that other failure. A producer error can keep its last successful quota, explicitly stale. Missing or invalid files are unavailable, never a fabricated zero. Configuring a file replaces any OMP reports for the same provider ID; removing the entry disables that source completely.
+
 ## Panel placement (monitor)
 
 Open **Settings → Display → Panel placement** and use the **Monitor** dropdown:

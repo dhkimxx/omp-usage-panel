@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in, file-only external usage snapshots with strict provider ownership, shared normalized validation, source-local freshness and partial-failure display. External data remains available when OMP fails; missing, invalid, expired and producer-error snapshots never invent zero quota or fresh timestamps.
+- Preserve `externalSources` through legacy configuration decoding, native Settings edits and atomic save/load; bundle the connector in the runtime.
+- Add the Antigravity label / AG compact mark without a provider-specific collector or new layout. Document the producer wire contract and passive statusline freshness limits.
+- Keep mixed-source intake clocks independent: old OMP caches cannot overwrite newer OMP data; healthy OMP collections confirm provider additions/removals even while an external source is stale or failed, without failed OMP data advancing roster confirmation. Configured external membership and saved selections remain intact. All-fail results preserve last good, and unavailable external cards never borrow another provider's capture time. Enforce the producer's 1 MiB file limit and document no-quota degradation and safe manual config edits.
+
 ## 1.1.0
 
 - Add an optional, default-off notch lock for the selected panel monitor. Preserve manual placement while locked, disable Option-drag only on that connected notched target, and keep monitor/fallback behavior unchanged otherwise.
