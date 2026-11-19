@@ -59,9 +59,44 @@ curl -fsSL https://raw.githubusercontent.com/dhkimxx/omp-usage-panel/main/instal
 Requires macOS 13+ and an authenticated omp that supports `omp usage --json`. The app is ad-hoc code-signed and not Apple-notarized. Updates are Ed25519-signed and verified by Sparkle.]]></description>
       <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v1.1.0/OMP-Usage-1.1.0.dmg" length="53038912" type="application/octet-stream" sparkle:edSignature="E8zip8OFixqAc5y5lRQHgO4cmOjddMfTru/h+zg3D/3ab286F/qEzXqrsatNpjUEyQmuabEcCE8H/sJi4aHYCA==" />
     </item>
+    <item>
+      <title>OMP Usage 1.2.0</title>
+      <pubDate>Thu, 19 Nov 2026 12:29:10 +0000</pubDate>
+      <sparkle:version>1.2.0</sparkle:version>
+      <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <omp:appTreeSHA256>8bc23418abff47793e5a7e4927cb48f60ca40412d73f5b726abf7d20114c0e0f</omp:appTreeSHA256>
+      <omp:sourceCommit>abac465526eda190c94341249a2f61725711e2a8</omp:sourceCommit>
+      <description sparkle:descriptionFormat="plain-text"><![CDATA[## One compact ring per account
+
+The Compact view now shows a separate ring for each account instead of one ring per provider.
+
+- Each ring opens that account's detail directly. A provider with several accounts gets numbered rings (for example `Codex 1`, `Codex 2`); Left/Right applies to all rings of a provider.
+- Rings count toward **Maximum slots**, so rings that previously fit may now move into **More**. The expanded Overview is still grouped by provider.
+- Account identity no longer depends on report order, so rings stay attached to the same account across refreshes. The usage cache is rebuilt once after the upgrade.
+
+## External usage snapshots (opt-in)
+
+Add `externalSources` to `config.json` to show usage from another tool as its own provider, for example Antigravity (`AG` ring).
+
+- File-only: the panel reads normalized JSON from the absolute paths you configure. It never runs a producer, reads provider credentials or calls a provider API.
+- A configured source owns its provider ID. Missing, invalid, expired or no-quota files show as unknown, never as zero usage, and never affect other providers.
+- Each source keeps its own freshness (`cacheMinutes`). Quit the app before editing `config.json` by hand; see `docs/external-snapshots.md` for the producer contract.
+
+## Install
+
+Installed copies update through the in-app updater. For a fresh install or reinstall:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dhkimxx/omp-usage-panel/main/install.sh | sh
+```
+
+Requires macOS 13+ and an authenticated omp that supports `omp usage --json`. The app is ad-hoc code-signed and not Apple-notarized. Updates are Ed25519-signed and verified by Sparkle.]]></description>
+      <enclosure url="https://github.com/dhkimxx/omp-usage-panel/releases/download/v1.2.0/OMP-Usage-1.2.0.dmg" length="53089909" type="application/octet-stream" sparkle:edSignature="uQOhwl6WXemEJ8QJXbJj5e0QHKS4VLFCKaqdaZGRC4Q7kq9DqJ5URO9eDWsz4Zw1YO+TOcSMgEZsjK6I8jK3Cw==" />
+    </item>
   </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: uKELs89LCbe8jElzXkq1TDRkJPWsf/BmFqkpbbI47gUnbMpAXSHtrGqrJjnDWTwk8R7VM6zRyCFqlWazrus1Dw==
-length: 4356
+edSignature: 8q0LveRUlvoMbvv1qokLgD9j0+//h+qiicD2kxLesom4msDbP1cd0h/ra28Xg8YPuuyxDsf4nl8L2sZStqxXCQ==
+length: 6887
 -->
