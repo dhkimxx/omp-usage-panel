@@ -2,7 +2,7 @@
 /** @typedef {import('./types.js').UsageAccount} UsageAccount */
 /** @typedef {import('./types.js').UsageLimit} UsageLimit */
 /** @typedef {{providers:string[]|null,labels:Record<string,string>,metrics:Record<string,string>,warnPercent:number,criticalPercent:number}} SummarySettings */
-/** @typedef {{provider:string,label:string,percent:number|null,value:string,severity:'normal'|'warning'|'critical'|'unknown',accountCount:number,accountId:string|null,accountLabel:string|null,metricId:string|null,metricLabel:string|null,windowLabel:string|null,notes:string[]}} ProviderSummary */
+/** @typedef {{provider:string,label:string,percent:number|null,value:string,severity:'normal'|'warning'|'critical'|'unknown',accountCount:number,accountId:string|null,accountLabel:string|null,metricId:string|null,metricLabel:string|null,windowLabel:string|null,notes:string[],accountSummaries?:ProviderSummary[]}} ProviderSummary */
 
 const order = ['openai-codex', 'opencode-go', 'minimax-code-cn', 'commandcode', 'mistral']
 /** @type {Record<string,string>} */
@@ -21,7 +21,11 @@ export function formatPercent(percent, thresholds = {}) {
 }
 /** @typedef {{account:UsageAccount,limit:UsageLimit,percent:number|null}} Candidate */
 /** @param {Candidate} a @param {Candidate} b */
-function compareIdentity(a, b) { return a.limit.id < b.limit.id ? -1 : a.limit.id > b.limit.id ? 1 : a.account.id < b.account.id ? -1 : a.account.id > b.account.id ? 1 : 0 }
+function compareIdentity(a, b) {
+  if (a.limit.id !== b.limit.id) return a.limit.id < b.limit.id ? -1 : 1
+  const x = a.account.summaryTieKey, y = b.account.summaryTieKey
+  return x < y ? -1 : x > y ? 1 : 0
+}
 /** @param {CollectionResult} result @param {SummarySettings} settings @returns {ProviderSummary[]} */
 export function summarizeProviders(result, settings) {
   const accounts = result.snapshot?.accounts ?? [], unavailable = result.snapshot?.unavailable ?? []
@@ -29,28 +33,49 @@ export function summarizeProviders(result, settings) {
   const providers = settings.providers ?? [...order.filter(id => ids.delete(id)), ...[...ids].sort()]
   return providers.map(provider => {
     const matching = accounts.filter(account => account.provider === provider)
-    let metricFound = false
-    const metric = Object.hasOwn(settings.metrics, provider) ? settings.metrics[provider] : undefined
-    /** @type {Candidate[]} */ const numeric = []
-    /** @type {Candidate[]} */ const exhausted = []
-    for (const account of matching) for (const limit of account.limits) {
-      if (metric !== undefined && limit.id !== metric) continue
-      metricFound = true
-      const fraction = limit.usedFraction
-      const percent = fraction !== undefined && Number.isFinite(fraction) && fraction >= 0 ? fraction * 100 : null
-      const candidate = { account, limit, percent: percent !== null && Number.isFinite(percent) ? percent : null }
-      if (candidate.percent !== null) numeric.push(candidate)
-      else if (limit.status === 'exhausted') exhausted.push(candidate)
+    const failed = unavailable.filter(item => item.provider === provider)
+    const hasUnavailable = failed.length > 0
+    const summary = summarize(provider, matching, settings, hasUnavailable)
+    if (matching.length > 1 || (matching.length === 1 && summary.accountId === null)
+        || failed.some(item => item.accountId !== undefined)) {
+      const accountSummaries = matching.map(account => ({
+        ...summarize(provider, [account], settings, hasUnavailable), accountId: account.id, accountLabel: clean(account.label),
+      }))
+      for (const item of failed) {
+        if (item.accountId === undefined) continue
+        accountSummaries.push({
+          ...summarize(provider, [], settings, true), accountId: item.accountId, accountLabel: clean(item.label),
+        })
+      }
+      summary.accountSummaries = accountSummaries.sort((a, b) => a.accountId < b.accountId ? -1 : a.accountId > b.accountId ? 1 : 0)
     }
-    numeric.sort((a, b) => /** @type {number} */ (b.percent) - /** @type {number} */ (a.percent) || compareIdentity(a, b))
-    exhausted.sort(compareIdentity)
-    const selected = numeric[0] ?? exhausted[0], percent = selected?.percent ?? null
-    /** @type {ProviderSummary['severity']} */
-    const severity = selected?.limit.status === 'exhausted' || percent !== null && percent >= settings.criticalPercent ? 'critical' : percent === null ? 'unknown' : percent >= settings.warnPercent ? 'warning' : 'normal'
-    const label = Object.hasOwn(settings.labels, provider) ? settings.labels[provider] : Object.hasOwn(aliases, provider) ? aliases[provider] : provider
-    return { provider, label: clean(label), percent, value: percent === null ? '—' : formatPercent(percent, settings), severity,
-      accountCount: matching.length, accountId: selected?.account.id ?? null, accountLabel: selected ? clean(selected.account.label) : null,
-      metricId: selected?.limit.id ?? null, metricLabel: selected ? clean(selected.limit.label) : null, windowLabel: selected?.limit.window ? clean(selected.limit.window.label) : null,
-      notes: [...(metric !== undefined && !metricFound ? ['Configured metric not found'] : []), ...(unavailable.some(item => item.provider === provider) ? ['Some usage data is unavailable'] : [])] }
+    return summary
   })
+}
+
+/** @param {string} provider @param {UsageAccount[]} accounts @param {SummarySettings} settings
+ * @param {boolean} hasUnavailable @returns {ProviderSummary} */
+function summarize(provider, accounts, settings, hasUnavailable) {
+  let metricFound = false
+  const metric = Object.hasOwn(settings.metrics, provider) ? settings.metrics[provider] : undefined
+  /** @type {Candidate[]} */ const numeric = []
+  /** @type {Candidate[]} */ const exhausted = []
+  for (const account of accounts) for (const limit of account.limits) {
+    if (metric !== undefined && limit.id !== metric) continue
+    metricFound = true
+    const fraction = limit.usedFraction
+    const percent = fraction !== undefined && Number.isFinite(fraction) && fraction >= 0 ? fraction * 100 : null
+    const candidate = { account, limit, percent: percent !== null && Number.isFinite(percent) ? percent : null }
+    if (candidate.percent !== null) numeric.push(candidate)
+    else if (limit.status === 'exhausted') exhausted.push(candidate)
+  }
+  numeric.sort((a, b) => /** @type {number} */ (b.percent) - /** @type {number} */ (a.percent) || compareIdentity(a, b))
+  exhausted.sort(compareIdentity)
+  const selected = numeric[0] ?? exhausted[0], percent = selected?.percent ?? null
+  const severity = selected?.limit.status === 'exhausted' || percent !== null && percent >= settings.criticalPercent ? 'critical' : percent === null ? 'unknown' : percent >= settings.warnPercent ? 'warning' : 'normal'
+  const label = Object.hasOwn(settings.labels, provider) ? settings.labels[provider] : Object.hasOwn(aliases, provider) ? aliases[provider] : provider
+  return { provider, label: clean(label), percent, value: percent === null ? '—' : formatPercent(percent, settings), severity,
+    accountCount: accounts.length, accountId: selected?.account.id ?? null, accountLabel: selected ? clean(selected.account.label) : null,
+    metricId: selected?.limit.id ?? null, metricLabel: selected ? clean(selected.limit.label) : null, windowLabel: selected?.limit.window ? clean(selected.limit.window.label) : null,
+    notes: [...(metric !== undefined && !metricFound ? ['Configured metric not found'] : []), ...(hasUnavailable ? ['Some usage data is unavailable'] : [])] }
 }

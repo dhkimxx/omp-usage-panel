@@ -1,12 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { summarizeProviders, formatPercent } from './summary.mjs'
+import { normalizeUsage } from './normalize.mjs'
 
 /** @typedef {import('./types.js').UsageLimit} UsageLimit */
 /** @param {string} id @param {number|undefined} usedFraction @param {string} [status] @returns {UsageLimit} */
 function limit(id, usedFraction, status) { return { id, label: id, amount: { unit: 'percent' }, notes: [], ...(usedFraction === undefined ? {} : { usedFraction }), ...(status ? { status } : {}) } }
 /** @param {string} id @param {string} provider @param {UsageLimit[]} limits @returns {import('./types.js').UsageAccount} */
-function account(id, provider, limits) { return { id, provider, label: id, fetchedAt: 1, notes: [], limits } }
+function account(id, provider, limits) { return { id, summaryTieKey: id, provider, label: id, fetchedAt: 1, notes: [], limits } }
 const settings = { providers: null, labels: {}, metrics: {}, warnPercent: 70, criticalPercent: 90 }
 /** @param {import('./types.js').UsageAccount[]} accounts @param {import('./types.js').UsageUnavailable[]} [unavailable] @returns {import('./types.js').CollectionResult} */
 function result(accounts, unavailable = []) { return { source: 'live', snapshot: { version: 1, capturedAt: 1, accounts, unavailable } } }
@@ -17,8 +18,24 @@ test('selects maximum across accounts, deterministic ties, exact metrics and ove
   assert.equal(s.value, '120%'); assert.equal(s.accountId, 'a'); assert.equal(s.accountCount, 2); assert.equal(s.severity, 'critical')
   const [filtered] = summarizeProviders(data, { ...settings, metrics: { mistral: 'b' } })
   assert.equal(filtered.percent, 80); assert.equal(filtered.severity, 'critical')
+  assert.deepEqual(filtered.accountSummaries?.map(s => [s.accountId, s.value]), [['a', '—'], ['z', '80%']])
   const [missing] = summarizeProviders(data, { ...settings, metrics: { mistral: 'monthly' } })
   assert.equal(missing.percent, null)
+  const [unknown] = summarizeProviders(result([account('known', 'mistral', [])]), settings)
+  assert.equal(unknown.accountSummaries?.[0].accountId, 'known')
+  assert.equal(unknown.accountSummaries?.[0].percent, null)
+})
+test('Overview preserves the representative for equal account usage', () => {
+  const weekly = { id: 'weekly', label: 'Weekly', amount: { unit: 'percent', used: 80 } }
+  const snapshot = normalizeUsage({ reports: [
+    { provider: 'openai-codex', fetchedAt: 1, metadata: { accountId: 'z', email: 'a@example.test' },
+      limits: [{ ...weekly, status: 'exhausted' }] },
+    { provider: 'openai-codex', fetchedAt: 1, metadata: { accountId: 'a', email: 'b@example.test' },
+      limits: [weekly] },
+  ] })
+  const [overview] = summarizeProviders({ source: 'live', snapshot }, settings)
+  assert.equal(overview.accountLabel, 'b@example.test')
+  assert.equal(overview.severity, 'warning')
 })
 test('unknown exhaustion, zero, provider order and unavailability remain distinct', () => {
   const data = result([account('a', 'mistral', [limit('x', undefined, 'exhausted')]), account('b', 'openai-codex', [limit('x', 0)])], [{ provider: 'other', label: 'Other', reason: 'Unavailable' }])

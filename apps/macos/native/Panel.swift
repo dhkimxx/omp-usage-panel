@@ -55,8 +55,8 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     // One coordinator for the whole app lifetime (owned by AppDelegate). It is independent of `generation`:
     // usage configuration changes never recreate it or reset its policy.
     private let updater: UpdaterCoordinator
-    private var compactViews: [String: NSView] = [:]
-    private var compactCards: [DashboardCard] = []
+    private var compactViews: [ExactString: NSView] = [:]
+    private var compactRings: [CompactRingPresentation] = []
     private var compactIssue = ""
     private var compactCollecting = false
     // `compactConnected` is the confirmed roster as of the latest render, which is what the compact plan uses.
@@ -327,7 +327,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
             let scope = ProviderDetailModel.reconciledScope(detailScope, connected: roster.known)
             if scope != detailScope { detailScope = scope; selectedAccount = nil }
             // Membership is seeded before any compact render and independent of render holds.
-            compactStore.initializeSelectionIfNeeded(summaries: newResult.summaries)
+            compactStore.initializeSelectionIfNeeded(summaries: newResult.compactGroups)
         }
         updateSettingsCatalog()
         generalSettings.updateCatalog(result: result)
@@ -348,8 +348,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         // A configuration change must never leave the previous profile's content exposed behind a menu or drag hold.
         guard ignoringHolds || (!interaction.isMenuOpen && !interaction.isDragging) else { return }
         let content = DashboardModel.make(result: result, issue: freshness, collecting: collecting, showPace: config.showPace)
-        // The compact selection is separate from `content`, which stays complete for the overview/detail.
-        compactCards = content.cards
+        compactRings = content.compactRings
         compactConnected = roster.known
         compactIssue = freshness
         compactCollecting = collecting
@@ -364,7 +363,7 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private func updateCompactPlan(capacities: CompactCapacities) -> (left: Int, right: Int) {
         if compactPlanRevision != compactRevision || compactPlanCapacities != capacities
             || (compactLeftItems.isEmpty && compactRightItems.isEmpty) {
-            let plan = CompactSlotPlanner.plan(cards: compactCards, preferences: compactStore.preferences,
+            let plan = CompactSlotPlanner.plan(rings: compactRings, preferences: compactStore.preferences,
                                                physicalCapacity: capacities, aliases: config.labels,
                                                issue: compactIssue, collecting: compactCollecting,
                                                connectedProviders: compactConnected)
@@ -380,25 +379,26 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
             button.contextMenu = { [weak self] in self?.menu() ?? NSMenu() }
             return button
         }
-        var next: [String: NSView] = [:]
+        var next: [ExactString: NSView] = [:]
         func views(for slots: [CompactSlot]) -> [NSView] {
             slots.map { slot in
+                let key = slot.key.exactKey
                 let view: NSView
                 switch slot {
                 case .provider(let presentation):
-                    let button = (compactViews[slot.key] as? CompactRingButton)
-                        ?? configured(CompactRingButton(frame: .zero), #selector(openProvider(_:)))
+                    let button = (compactViews[key] as? CompactRingButton)
+                        ?? configured(CompactRingButton(frame: .zero), #selector(openRing(_:)))
                     button.update(presentation); view = button
                 case .more(let presentation):
-                    let button = (compactViews[slot.key] as? CompactMoreButton)
+                    let button = (compactViews[key] as? CompactMoreButton)
                         ?? configured(CompactMoreButton(frame: .zero), #selector(openOverview))
                     button.update(presentation); view = button
                 case .configure(let presentation):
-                    let button = (compactViews[slot.key] as? CompactConfigureButton)
+                    let button = (compactViews[key] as? CompactConfigureButton)
                         ?? configured(CompactConfigureButton(frame: .zero), #selector(openDisplaySettings))
                     button.update(presentation); view = button
                 }
-                next[slot.key] = view
+                next[key] = view
                 return view
             }
         }
@@ -412,17 +412,19 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
     // Live provider exposure choices: every current provider, then selected IDs the data lacks.
     private func liveCompactChoices(for preferences: CompactPreferences) -> [CompactProviderChoice] {
-        var known = Set<String>()
+        var known = Set<ExactString>()
         var choices: [CompactProviderChoice] = []
-        for summary in result?.summaries ?? [] where known.insert(summary.provider).inserted {
+        for summary in result?.compactGroups ?? [] where known.insert(summary.provider.exactKey).inserted {
             let reported = summary.accountCount > 0
-            let value = reported ? summary.value : "No usage report"
+            let usage = reported ? summary.value : "No usage report"
+            let ringCount = summary.accountSummaries?.count ?? max(1, summary.accountCount)
+            let value = ringCount > 1 ? "\(usage) · \(ringCount) accounts" : usage
             choices.append(CompactProviderChoice(
                 id: summary.provider, label: summary.label,
                 detail: summary.label == summary.provider ? value : "\(summary.provider) · \(value)",
-                isReported: reported))
+                isReported: reported, ringCount: ringCount))
         }
-        for id in preferences.selectedProviderIDs ?? [] where known.insert(id).inserted {
+        for id in preferences.selectedProviderIDs ?? [] where known.insert(id.exactKey).inserted {
             let label = config.labels[id] ?? id
             choices.append(CompactProviderChoice(
                 id: id, label: label,
@@ -701,9 +703,17 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         manualStore.clear()
         manualPlacement = nil; positionPanel()
     }
-    @objc private func openProvider(_ sender: NSButton) {
-        guard let provider = sender.identifier?.rawValue else { return }
-        selectProvider(provider)
+    @objc private func openRing(_ sender: CompactRingButton) {
+        guard let ring = sender.presentation else { return }
+        guard let id = ring.accountID else { selectProvider(ring.provider); return }
+        guard let snapshot = result?.snapshot else { openOverview(); return }
+        let hasAccount = snapshot.accounts.contains {
+            $0.provider.isExactlyEqual(to: ring.provider) && $0.id.isExactlyEqual(to: id)
+        } || snapshot.unavailable.contains {
+            $0.provider.isExactlyEqual(to: ring.provider) && $0.accountId?.isExactlyEqual(to: id) == true
+        }
+        guard hasAccount else { openOverview(); return }
+        openDetail(scope: .provider(ring.provider), account: .account(provider: ring.provider, id: id))
     }
     private func selectProvider(_ provider: String) {
         openDetail(scope: .provider(provider))
@@ -712,12 +722,13 @@ final class PanelController: NSObject, NSWindowDelegate, NSMenuDelegate {
         selectedAccount = detail.configure(result: result, scope: detailScope, selectedAccount: selectedAccount,
                                            config: config, collecting: collecting, transportError: transportError, now: Date())
     }
-    private func openDetail(scope requested: DetailScope) {
+    private func openDetail(scope requested: DetailScope, account: DetailAccountKey? = nil) {
         cancelHover()
         // A provider menu opened before a refresh removed its provider can still deliver that choice after the
         // refresh landed (rendering is held while a menu tracks); the current roster decides, not the stale menu.
         let scope = ProviderDetailModel.reconciledScope(requested, connected: roster.known)
-        if detailScope != scope { selectedAccount = nil }
+        if let account, scope == requested { selectedAccount = account }
+        else if detailScope != scope { selectedAccount = nil }
         detailScope = scope; showingDetail = true
         interaction.setPinned(true)
         configureDetail(); positionPanel(animated: true)

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Show separate rings for accounts in Compact view. Each ring opens that account directly and counts toward **Maximum slots**; the expanded Overview remains grouped by provider.
+
 ## 1.0.1
 
 - Add release automation: a trusted-GitHub-runner universal DMG candidate with build-provenance attestation, `release:ci-build`, `release:verify-ci` and `release:package -- --ci-run <ID>` to sign the exact attested bytes locally, and a keyless `release:audit` of the committed feed against public assets. The update key stays local; CI never signs or publishes, and the existing update protocol remains compatible.

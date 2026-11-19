@@ -74,6 +74,38 @@ test('a removed provider leaves the next successful snapshot and is never resurr
     assert.equal(emptyStale.source, 'stale'); assert.deepEqual(emptyStale.summaries, [])
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
+test('compact accounts ignore the Overview filter and keep identity when usage goes missing', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'panel-account-rings-'))
+  try {
+    const bin = path.join(dir, 'omp'), configPath = path.join(dir, 'config.json')
+    await writeFile(configPath, JSON.stringify({ ...defaultConfig({ nodePath: process.execPath, ompPath: bin }), providers: ['mistral'] }))
+    /** @param {string} email @param {number} used */
+    const report = (email, used) => ({
+      provider: 'openai-codex', fetchedAt: 1, metadata: { email, accountId: 'shared', orgId: 'team' },
+      limits: [{ id: 'weekly', label: 'Weekly', amount: { unit: 'percent', used } }],
+    })
+    const first = report('a@example.test', 10), second = report('b@example.test', 80)
+    /** @param {unknown} payload */
+    async function collect(payload) {
+      await writeFile(bin, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(JSON.stringify(payload))})\n`, { mode: 0o700 })
+      const { stdout } = await run(process.execPath, [bridge, '--config', configPath, '--refresh'], { env: { ...process.env, HOME: dir } })
+      return JSON.parse(stdout)
+    }
+    const initial = await collect({ reports: [first, second] })
+    assert.deepEqual(initial.summaries.map((/** @type {{provider:string}} */ s) => s.provider), ['mistral'])
+    const rings = initial.compactSummaries[0].accountSummaries
+    assert.deepEqual(rings.map((/** @type {{value:string}} */ r) => r.value), ['10%', '80%'])
+    const reordered = await collect({ reports: [second, first] })
+    assert.deepEqual(reordered.compactSummaries[0].accountSummaries, rings)
+    const failed = await collect({ reports: [second], accountsWithoutUsage: [
+      { provider: 'openai-codex', ...first.metadata },
+    ], disabledCredentials: [{ provider: 'openai-codex', email: 'disabled@example.test' }] })
+    const kept = failed.compactSummaries[0].accountSummaries
+    assert.deepEqual(kept.map((/** @type {{accountId:string}} */ r) => r.accountId), [rings[0].accountId, rings[1].accountId])
+    assert.equal(kept[0].percent, null)
+    assert.equal(kept[1].value, '80%')
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
 test('invalid config and command arguments fail without leaking their contents', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'panel-invalid-'))
   try {

@@ -486,6 +486,7 @@ struct CompactRingPresentation: Equatable {
     }
 
     let provider: String
+    let accountID: String?
     let label: String
     let mark: String
     let arc: Arc
@@ -509,12 +510,15 @@ struct CompactRingPresentation: Equatable {
         return .fraction(min(1, max(0, percent / 100)))
     }
 
-    init(card: DashboardCard) {
+    init(card: DashboardCard, accountID: String? = nil, accountLabel: String? = nil, number: Int? = nil) {
         let over = Self.isOverLimit(percent: card.percent)
         let arc = Self.arc(percent: card.percent)
         provider = card.provider
-        label = card.label
-        mark = CompactMark.monogram(provider: card.provider, label: card.label)
+        self.accountID = accountID
+        let name = number.map { "\(card.label) \($0)" } ?? card.label
+        label = accountLabel.map { "\(name) · \($0)" } ?? name
+        let monogram = CompactMark.monogram(provider: card.provider, label: card.label)
+        mark = number.map { "\(monogram.prefix(1))\($0)" } ?? monogram
         self.arc = arc
         severity = card.severity
         valueText = arc == .unknown ? "usage unknown" : card.value
@@ -525,9 +529,10 @@ struct CompactRingPresentation: Equatable {
         if over { lines.append("Over limit: \(card.value) used") }
         else if arc == .unknown { lines.append("Usage unknown") }
         lines.append(card.tooltip)
+        if let number { lines.append("Compact ring: \(number)") }
         lines.append("Provider ID: \(card.provider)")
         tooltip = lines.joined(separator: "\n")
-        var parts = [card.label, valueText]
+        var parts = [label, valueText]
         if over { parts.append("over limit") }
         if card.hasIssue { parts.append("attention required") }
         accessibilityLabel = parts.joined(separator: ", ")
@@ -540,6 +545,7 @@ struct CompactRingPresentation: Equatable {
     init(missingProvider: String, label: String, issue: String = "") {
         let issue = issue.trimmingCharacters(in: .whitespacesAndNewlines)
         provider = missingProvider
+        accountID = nil
         self.label = label
         mark = CompactMark.monogram(provider: missingProvider, label: label)
         arc = .unknown
@@ -567,7 +573,7 @@ struct CompactMorePresentation: Equatable {
         count = hidden.count
         text = hidden.count > 99 ? "99+" : "+\(hidden.count)"
         hasWarning = hidden.contains { $0.hasWarning || $0.isOverLimit }
-        let noun = hidden.count == 1 ? "provider" : "providers"
+        let noun = hidden.count == 1 ? "ring" : "rings"
         var lines = ["\(hidden.count) more \(noun) — open the overview"]
         for entry in hidden.prefix(12) {
             var line = "• \(entry.label) — \(entry.valueText)"
@@ -617,7 +623,9 @@ enum CompactSlot: Equatable {
     // Stable view identity, so controls are reused across data refreshes.
     var key: String {
         switch self {
-        case .provider(let ring): return "provider\u{0}\(ring.provider)"
+        case .provider(let ring):
+            if let id = ring.accountID { return "account\u{0}\(ring.provider.utf8.count):\(ring.provider)\(id)" }
+            return "provider\u{0}\(ring.provider)"
         case .more: return "more"
         case .configure: return "configure"
         }
@@ -644,35 +652,28 @@ enum CompactSlotPlanner {
     // `maximumVisibleSlots` is ONE budget for every compact control on both wings, including the
     // single aggregate More control. Membership is independent of it. Each provider keeps its own
     // wing (never moved to fit) and the wings are bounded independently by physical capacity.
-    // On overflow one slot is reserved for More on the wing of the first provider that cannot be
-    // shown; the remaining providers are then chosen greedily in their existing order. More lists
-    // every hidden provider, whichever wing it prefers.
+    // On overflow More takes one slot on the wing of the first ring that cannot fit.
     //
     // `connectedProviders` is the last roster a successful collection CONFIRMED (nil until one did: first load,
-    // restart; see ConnectedProviders, which keeps it through later stale/failed refreshes). A selected provider
-    // the cards lack is drawn as a not-reported placeholder only while no roster is known; once it is known to be
-    // disconnected it is simply not drawn. The saved selection is never rewritten, so a provider that
-    // reconnects returns to its place.
-    static func plan(cards: [DashboardCard], preferences: CompactPreferences,
+    // restart). Without a confirmed roster, a selected provider can show a placeholder before it reports.
+    // A confirmed removal hides its rings without changing the saved selection.
+    static func plan(rings: [CompactRingPresentation], preferences: CompactPreferences,
                      physicalCapacity: CompactCapacities,
                      aliases: ExactConfigMap = [:], issue: String = "",
                      collecting: Bool = false,
                      connectedProviders: Set<ExactString>? = nil) -> CompactSlotPlan {
         let preferences = preferences.normalized
         let selected = preferences.selectedProviderIDs ?? []
-        // Membership is by exact string identity (never Swift canonical equivalence), like every provider ID.
         let selectedSet = Set(selected.map(\.exactKey))
-        var firstCard: [ExactString: DashboardCard] = [:]
-        for card in cards where firstCard[card.provider.exactKey] == nil { firstCard[card.provider.exactKey] = card }
-        // Current upstream order first; selected IDs the data lacks (and that are not known to be
-        // disconnected) follow in selection order.
-        func stillConnected(_ id: String) -> Bool { connectedProviders?.contains(id.exactKey) ?? true }
-        var entries: [CompactRingPresentation] = []
         var included = Set<ExactString>()
-        for card in cards where selectedSet.contains(card.provider.exactKey) && included.insert(card.provider.exactKey).inserted {
-            entries.append(CompactRingPresentation(card: card))
+        var entries: [CompactRingPresentation] = []
+        for ring in rings {
+            let key = ring.provider.exactKey
+            guard selectedSet.contains(key) else { continue }
+            included.insert(key)
+            entries.append(ring)
         }
-        for id in selected where firstCard[id.exactKey] == nil && stillConnected(id) {
+        for id in selected where !included.contains(id.exactKey) && (connectedProviders?.contains(id.exactKey) ?? true) {
             entries.append(CompactRingPresentation(missingProvider: id, label: aliases[id] ?? id, issue: issue))
         }
         let sides = entries.map { preferences.side(for: $0.provider) }

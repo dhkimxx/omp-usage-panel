@@ -173,20 +173,25 @@ enum ProviderDetailModel {
         let accounts = result?.snapshot?.accounts ?? []
         let unavailable = result?.snapshot?.unavailable ?? []
         func includes(_ provider: String) -> Bool {
-            if case let .provider(selected) = scope { return provider == selected }
+            if case let .provider(selected) = scope { return provider.isExactlyEqual(to: selected) }
             return true
         }
         var choices = accounts.filter { includes($0.provider) }.map {
             DetailAccountChoice(key: .account(provider: $0.provider, id: $0.id), label: $0.label,
                                 providerLabel: labels[$0.provider] ?? $0.provider, account: $0, unavailable: nil)
         }
-        // Unavailable records do not carry credential IDs. Occurrences disambiguate reports only.
+        // Account failures share the account key. Model and disabled reports have no account key.
         var occurrences: [String: [String: Int]] = [:]
         for report in unavailable where includes(report.provider) {
-            let occurrence = occurrences[report.provider, default: [:]][report.label, default: 0]
-            occurrences[report.provider, default: [:]][report.label] = occurrence + 1
-            choices.append(DetailAccountChoice(key: .unavailable(provider: report.provider, label: report.label,
-                                                               occurrence: occurrence), label: report.label,
+            let key: DetailAccountKey
+            if let id = report.accountId {
+                key = .account(provider: report.provider, id: id)
+            } else {
+                let occurrence = occurrences[report.provider, default: [:]][report.label, default: 0]
+                occurrences[report.provider, default: [:]][report.label] = occurrence + 1
+                key = .unavailable(provider: report.provider, label: report.label, occurrence: occurrence)
+            }
+            choices.append(DetailAccountChoice(key: key, label: report.label,
                                                providerLabel: labels[report.provider] ?? report.provider,
                                                account: nil, unavailable: report))
         }

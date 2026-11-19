@@ -80,6 +80,13 @@ func runProviderDetailModelTests() {
     let reordered = result([b, other, a], summaries: [summary("p", selected: "first")])
     let retained = content(reordered, scope: .provider("p"), key: provider.selected?.key)
     precondition(retained.selected?.key == .account(provider: "p", id: "chosen"))
+    let failed = result([a], reports: [
+        UsageUnavailable(provider: "p", label: "Label chosen", reason: "Usage unavailable", accountId: "chosen")
+    ])
+    let selectedFailure = content(failed, scope: .provider("p"), key: retained.selected?.key)
+    precondition(selectedFailure.selected?.account == nil && selectedFailure.account.cautions == ["Usage unavailable"])
+    let recovered = content(initial, scope: .provider("p"), key: selectedFailure.selected?.key)
+    precondition(recovered.limits.map { $0.limit.id } == ["selected-limit"])
     // Removed selections choose the first actual record, not a new summary-selected credential.
     let removed = content(result([a, b], summaries: [summary("p", selected: "chosen")]),
                           scope: .provider("p"), key: .account(provider: "p", id: "removed"))

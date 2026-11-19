@@ -95,7 +95,10 @@ struct CompactSettingsDraft: Equatable {
 
     /// Plain-language fit of the staged selection into the staged maximum (all slots are one shared budget).
     var summary: String {
-        let count = Set((selectedProviderIDs ?? []).map(\.exactKey)).count
+        var selected = Set((selectedProviderIDs ?? []).map(\.exactKey))
+        let count = baseline.providers.reduce(0) { count, provider in
+            count + (selected.remove(provider.id.exactKey) == nil ? 0 : provider.ringCount)
+        } + selected.count
         let slots = parsedMaximum ?? baseline.preferences.maximumVisibleSlots
         return CompactPreferences.capacitySummary(selectedCount: count, maximum: slots)
     }

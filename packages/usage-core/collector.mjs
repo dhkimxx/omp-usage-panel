@@ -11,6 +11,7 @@ import { normalizeUsage } from './normalize.mjs';
 /** @typedef {import('./types.js').CollectionResult} CollectionResult */
 /** @typedef {import('./types.js').UsageSnapshot} UsageSnapshot */
 const run = promisify(execFile);
+const cacheVersion = 2; // Account keys no longer depend on report position.
 /** @param {NodeJS.ProcessEnv} [env] @returns {CollectorOptions} */
 export function collectorOptionsFromEnv(env = process.env) {
   return { ...(env.OMP_BIN ? { ompBin: env.OMP_BIN } : {}), ...(env.OMP_PROFILE !== undefined ? { profile: env.OMP_PROFILE } : env.PI_PROFILE !== undefined ? { profile: env.PI_PROFILE } : {}),
@@ -50,8 +51,8 @@ const optionalString = x => x === undefined || typeof x === 'string';
 /** @param {unknown} value @returns {value is UsageSnapshot} */
 function validUsageSnapshot(value) {
   if (!object(value) || value.version !== 1 || !finite(value.capturedAt) || !Array.isArray(value.accounts) || !Array.isArray(value.unavailable)) return false;
-  return value.unavailable.every(u => object(u) && typeof u.provider === 'string' && typeof u.label === 'string' && typeof u.reason === 'string') && value.accounts.every(a => {
-    if (!object(a) || typeof a.id !== 'string' || typeof a.provider !== 'string' || typeof a.label !== 'string' || !finite(a.fetchedAt) || !optionalString(a.plan) || !stringArray(a.notes) || !Array.isArray(a.limits)) return false;
+  return value.unavailable.every(u => object(u) && typeof u.provider === 'string' && typeof u.label === 'string' && typeof u.reason === 'string' && optionalString(u.accountId)) && value.accounts.every(a => {
+    if (!object(a) || typeof a.id !== 'string' || typeof a.summaryTieKey !== 'string' || typeof a.provider !== 'string' || typeof a.label !== 'string' || !finite(a.fetchedAt) || !optionalString(a.plan) || !stringArray(a.notes) || !Array.isArray(a.limits)) return false;
     return a.limits.every(l => {
       if (!object(l) || typeof l.id !== 'string' || typeof l.label !== 'string' || !object(l.amount) || typeof l.amount.unit !== 'string' || !optionalNumber(l.amount.used) || !optionalNumber(l.amount.limit) || !optionalNumber(l.amount.remaining) || !optionalNumber(l.usedFraction) || !optionalString(l.status) || !stringArray(l.notes)) return false;
       return l.window === undefined || (object(l.window) && typeof l.window.id === 'string' && typeof l.window.label === 'string' && optionalNumber(l.window.durationMs) && optionalNumber(l.window.resetsAt) && optionalString(l.window.resetLabel) && (l.window.estimated === undefined || typeof l.window.estimated === 'boolean'));
@@ -71,7 +72,7 @@ export async function collectUsage(options = {}) {
     const stat = await lstat(cacheFile);
     if (stat.isFile() && !stat.isSymbolicLink()) {
       const data = /** @type {unknown} */ (JSON.parse(await readFile(cacheFile, 'utf8')));
-      if (object(data) && data.version === 1 && data.identity === identity && validUsageSnapshot(data.snapshot)) previous = data.snapshot;
+      if (object(data) && data.version === cacheVersion && data.identity === identity && validUsageSnapshot(data.snapshot)) previous = data.snapshot;
     }
   } catch { /* Missing or corrupt cache is a miss. */ }
   if (!options.force && previous && now >= previous.capturedAt && now - previous.capturedAt < maxAge) return { snapshot: previous, source: 'cache' };
@@ -98,7 +99,7 @@ export async function collectUsage(options = {}) {
       const temporary = path.join(cacheDir, `.${identity}.${randomBytes(12).toString('hex')}.tmp`);
       try {
         const file = await open(temporary, 'wx', 0o600);
-        try { await file.writeFile(JSON.stringify({ version: 1, identity, snapshot })); } finally { await file.close(); }
+        try { await file.writeFile(JSON.stringify({ version: cacheVersion, identity, snapshot })); } finally { await file.close(); }
         await rename(temporary, cacheFile);
       } finally { await unlink(temporary).catch(() => {}); }
     } catch { /* A cache write failure must not hide a successful live result. */ }

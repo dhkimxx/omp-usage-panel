@@ -49,6 +49,11 @@ func runDashboardModelTests() {
         let card = content([missing]).cards[0]
         precondition(card.window == nil && card.elapsed(now: now) == nil)
     }
+    let metricID = "e\u{0301}"
+    let exactMetric = UsageSnapshot(version: 1, capturedAt: 14000, accounts: [
+        account("mistral", "chosen", [limit("\u{00e9}", window(reset: 90000)), limit(metricID, window())])
+    ], unavailable: [])
+    precondition(content([summary(metricId: metricID)], snapshot: exactMetric).cards[0].window?.resetsAt == 20000)
     let summaries = [summary("mistral", percent: 120.125, value: "120.1%", severity: "critical"),
                      summary("openai-codex", percent: 0, value: "0%"),
                      summary("opencode-go", percent: nil, value: "—", severity: "unknown"),
@@ -106,7 +111,7 @@ func runDashboardModelTests() {
     // providers, exact values, over-limit percentages, tooltips) is unchanged by it.
     let wide = content((0..<8).map { summary("provider\($0)", percent: $0 == 3 ? 104 : Double($0) * 10,
                                               value: $0 == 3 ? "104%" : "\($0 * 10)%") })
-    let compactPlan = CompactSlotPlanner.plan(cards: wide.cards,
+    let compactPlan = CompactSlotPlanner.plan(rings: wide.compactRings,
                                               preferences: CompactPreferences(maximumVisibleSlots: 2,
                                                                               selectedProviderIDs: wide.cards.map { $0.provider }),
                                               physicalCapacity: CompactCapacities(left: 100, right: 100, total: 100))
@@ -114,6 +119,35 @@ func runDashboardModelTests() {
     precondition(wide.cards.count == 8 && wide.footer.hasPrefix("8 providers"))
     precondition(wide.cards[3].percent == 104 && wide.cards[3].tooltip.contains("104%"))
     precondition(wide.cards.map { $0.provider } == (0..<8).map { "provider\($0)" })
+    let codex = "openai-codex"
+    let first = summary(codex, percent: 20, value: "20%", accountId: "first")
+    let second = summary(codex, percent: 80, value: "80%", accountId: "second")
+    var codexSummary = summary(codex, percent: 80, value: "80%", accountId: "second", accountCount: 2)
+    codexSummary.accountSummaries = [first, second]
+    let otherProviders = ["anthropic", "mistral", "zai"]
+    let fiveAccounts = content([codexSummary] + otherProviders.map { summary($0) },
+                               snapshot: UsageSnapshot(version: 1, capturedAt: 14000, accounts: [
+                                   account(codex, "first", [limit("chosen", window())]),
+                                   account(codex, "second", [limit("chosen", window())]),
+                               ] + otherProviders.map { account($0, "chosen", [limit("chosen", window())]) }, unavailable: []))
+    var ringPreferences = CompactPreferences(maximumVisibleSlots: 5, selectedProviderIDs: [codex] + otherProviders,
+                                             providerSides: [codex: .left])
+    let capacities = CompactCapacities(left: 2, right: 3, total: 5)
+    let fiveRings = CompactSlotPlanner.plan(rings: fiveAccounts.compactRings, preferences: ringPreferences,
+                                           physicalCapacity: capacities)
+    precondition(fiveAccounts.cards.count == 4 && fiveAccounts.cards[0].context == "2 accounts")
+    precondition(fiveRings.slots.count == 5 && fiveRings.hiddenProviderIDs.isEmpty)
+    precondition(Set(fiveRings.slots.map(\.key)).count == 5)
+    guard case .provider(let ring1) = fiveRings.leftSlots[0],
+          case .provider(let ring2) = fiveRings.leftSlots[1] else { preconditionFailure("Expected two Codex rings") }
+    precondition(ring1.accountID == "first" && ring1.mark == "C1" && ring1.valueText == "20%")
+    precondition(ring2.accountID == "second" && ring2.mark == "C2" && ring2.valueText == "80%")
+    ringPreferences.maximumVisibleSlots = 2
+    let overflow = CompactSlotPlanner.plan(rings: fiveAccounts.compactRings, preferences: ringPreferences,
+                                           physicalCapacity: capacities)
+    guard case .more(let more) = overflow.slots.last else { preconditionFailure("Expected overflow") }
+    precondition(more.count == 4 && more.tooltip.contains("Label \(codex) 2"))
+
     runProviderRemovalTransitionTests()
 }
 
@@ -151,8 +185,8 @@ private func runProviderRemovalTransitionTests() {
     // The compact row of the final state; a trailing "?" marks a not-reported placeholder.
     func row(_ intake: UsageIntake, selection: [String]) -> [String] {
         let issue = intake.transportError.map { "Stale: \($0)" } ?? ""
-        let cards = DashboardModel.make(result: intake.result, issue: issue, collecting: false, showPace: true).cards
-        let plan = CompactSlotPlanner.plan(cards: cards,
+        let rings = DashboardModel.make(result: intake.result, issue: issue, collecting: false, showPace: true).compactRings
+        let plan = CompactSlotPlanner.plan(rings: rings,
                                            preferences: CompactPreferences(maximumVisibleSlots: 6, selectedProviderIDs: selection),
                                            physicalCapacity: CompactCapacities(left: 10, right: 10, total: 10),
                                            issue: issue, connectedProviders: intake.roster.known)

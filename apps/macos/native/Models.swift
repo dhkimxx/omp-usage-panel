@@ -88,13 +88,18 @@ struct UsageAmount: Decodable { let unit: String; let used: Double?; let limit: 
 struct UsageWindow: Decodable { let id: String; let label: String; let durationMs: Double?; let resetsAt: Double?; let resetLabel: String?; let estimated: Bool? }
 struct UsageLimit: Decodable { let id: String; let label: String; let amount: UsageAmount; let window: UsageWindow?; let usedFraction: Double?; let status: String?; let notes: [String] }
 struct UsageAccount: Decodable { let id: String; let provider: String; let label: String; let fetchedAt: Double; let plan: String?; let notes: [String]; let limits: [UsageLimit] }
-struct UsageUnavailable: Decodable { let provider: String; let label: String; let reason: String }
+struct UsageUnavailable: Decodable { let provider: String; let label: String; let reason: String; var accountId: String? = nil }
 struct UsageSnapshot: Decodable { let version: Int; let capturedAt: Double; let accounts: [UsageAccount]; let unavailable: [UsageUnavailable] }
 struct ProviderSummary: Decodable {
     let provider: String; let label: String; let percent: Double?; let value: String; let severity: String
     let accountCount: Int; let accountId: String?; let accountLabel: String?; let metricId: String?; let metricLabel: String?; let windowLabel: String?; let notes: [String]
+    var accountSummaries: [ProviderSummary]? = nil
 }
-struct PanelResult: Decodable { let snapshot: UsageSnapshot?; let source: String; let error: String?; let summaries: [ProviderSummary] }
+struct PanelResult: Decodable {
+    let snapshot: UsageSnapshot?; let source: String; let error: String?; let summaries: [ProviderSummary]
+    var compactSummaries: [ProviderSummary]? = nil
+    var compactGroups: [ProviderSummary] { compactSummaries ?? summaries }
+}
 
 /// The last CONFIRMED set of connected providers for one collection source (profile/config). A SUCCESSFUL
 /// collection (snapshot present, source live or cache, no error; an empty roster counts) replaces it with every
