@@ -104,11 +104,12 @@ struct UsageAmount: Decodable { let unit: String; let used: Double?; let limit: 
 struct UsageWindow: Decodable { let id: String; let label: String; let durationMs: Double?; let resetsAt: Double?; let resetLabel: String?; let estimated: Bool? }
 struct UsageLimit: Decodable { let id: String; let label: String; let amount: UsageAmount; let window: UsageWindow?; let usedFraction: Double?; let status: String?; let notes: [String] }
 struct UsageAccount: Decodable { let id: String; let provider: String; let label: String; let fetchedAt: Double; let plan: String?; let notes: [String]; let limits: [UsageLimit] }
-struct UsageUnavailable: Decodable { let provider: String; let label: String; let reason: String }
+struct UsageUnavailable: Decodable { let provider: String; let label: String; let reason: String; var accountId: String? = nil }
 struct UsageSnapshot: Decodable { let version: Int; let capturedAt: Double; let accounts: [UsageAccount]; let unavailable: [UsageUnavailable] }
 struct ProviderSummary: Decodable {
     let provider: String; let label: String; let percent: Double?; let value: String; let severity: String
     let accountCount: Int; let accountId: String?; let accountLabel: String?; let metricId: String?; let metricLabel: String?; let windowLabel: String?; let notes: [String]
+    var accountSummaries: [ProviderSummary]? = nil
 }
 struct ProviderSource: Decodable {
     let provider: String
@@ -130,6 +131,8 @@ struct PanelResult: Decodable {
     let summaries: [ProviderSummary]
     var providerSources: [ProviderSource]? = nil
     var ompSource: OMPSource? = nil
+    var compactSummaries: [ProviderSummary]? = nil
+    var compactGroups: [ProviderSummary] { compactSummaries ?? summaries }
 
     func source(for provider: String) -> ProviderSource? {
         providerSources?.first { $0.provider.isExactlyEqual(to: provider) }
@@ -293,14 +296,19 @@ struct UsageIntake {
         let unavailable = (incoming.snapshot?.unavailable ?? []).filter { !discarded.contains($0.provider.exactKey) } +
             (previous?.snapshot?.unavailable ?? []).filter { retained.contains($0.provider.exactKey) }
         // Keep configured summary order while excluding providers absent from the newer retained OMP roster.
-        var summaries = incoming.summaries.compactMap { summary -> ProviderSummary? in
-            guard discarded.contains(summary.provider.exactKey) else { return summary }
-            return retained.contains(summary.provider.exactKey) ? previous?.summaries.first {
-                $0.provider.isExactlyEqual(to: summary.provider)
-            } : nil
+        func mergeSummaries(_ next: [ProviderSummary], _ prior: [ProviderSummary]) -> [ProviderSummary] {
+            var summaries = next.compactMap { summary -> ProviderSummary? in
+                let key = summary.provider.exactKey
+                guard discarded.contains(key) else { return summary }
+                return retained.contains(key) ? prior.first { $0.provider.exactKey == key } : nil
+            }
+            let shown = Set(summaries.map { $0.provider.exactKey })
+            summaries += prior.filter { retained.contains($0.provider.exactKey) && !shown.contains($0.provider.exactKey) }
+            return summaries
         }
-        let shown = Set(summaries.map { $0.provider.exactKey })
-        summaries += (previous?.summaries ?? []).filter { retained.contains($0.provider.exactKey) && !shown.contains($0.provider.exactKey) }
+        let summaries = mergeSummaries(incoming.summaries, previous?.summaries ?? [])
+        let compactSummaries = incoming.compactSummaries != nil || previous?.compactSummaries != nil
+            ? mergeSummaries(incoming.compactGroups, previous?.compactGroups ?? []) : nil
         let healthyOMP = (effectiveOMP.source == "live" || effectiveOMP.source == "cache") && (effectiveOMP.error ?? "").isEmpty
         let healthyExternal = sources.filter { externalIDs.contains($0.provider.exactKey) }
             .map { ($0.source == "live" || $0.source == "cache") && ($0.error ?? "").isEmpty }
@@ -312,7 +320,8 @@ struct UsageIntake {
         let snapshot = captures.min().map { UsageSnapshot(version: 1, capturedAt: $0, accounts: accounts, unavailable: unavailable) }
         return PanelResult(snapshot: snapshot, source: failed ? (healthy ? "partial" : snapshot == nil ? "unavailable" : "stale") : effectiveOMP.source,
                            error: failed ? (incoming.error ?? effectiveOMP.error ?? "Usage data is unavailable") : nil,
-                           summaries: summaries, providerSources: sources, ompSource: effectiveOMP)
+                           summaries: summaries, providerSources: sources, ompSource: effectiveOMP,
+                           compactSummaries: compactSummaries)
     }
 
     /// A genuine profile/config-source change: nothing from the previous source may decide anything.

@@ -31,17 +31,34 @@ export function normalizeUsage(payload, capturedAt = Date.now()) {
   if (!Array.isArray(root.reports)) throw new Error('Invalid usage response');
   /** @type {UsageSnapshot} */
   const snapshot = { version: 1, capturedAt, accounts: [], unavailable: [] };
+  /** @type {Map<string, number>} */
+  const occurrences = new Map();
+  /** @param {string} provider @param {Record<string, unknown>} details @param {Record<string, unknown>} [scope] */
+  function accountId(provider, details, scope = {}) {
+    const principal = text(details.email) ?? text(details.accountId) ?? text(scope.accountId)
+      ?? text(details.projectId) ?? text(scope.projectId) ?? text(details.enterpriseUrl);
+    const org = text(details.orgId) ?? text(scope.orgId);
+    // Failure rows have the account identity, but not omp's credential ID.
+    const key = Buffer.from(JSON.stringify(principal || org
+      ? [provider, 'identity', principal?.toLowerCase(), org?.toLowerCase()]
+      : [provider, 'credential', num(details.credentialId) ?? text(details.credentialId)])).toString('base64url');
+    const occurrence = (occurrences.get(key) ?? 0) + 1;
+    occurrences.set(key, occurrence);
+    return `${key}:${occurrence}`;
+  }
   for (const [index, raw] of root.reports.entries()) {
     const report = obj(raw), metadata = obj(report.metadata);
     const provider = text(report.provider);
     if (!provider || !Array.isArray(report.limits)) throw new Error('Invalid usage report');
     const firstScope = obj(obj(report.limits[0]).scope);
-    const identity = text(metadata.accountId) ?? text(firstScope.accountId) ?? text(metadata.email) ?? text(metadata.orgId) ?? text(firstScope.orgId) ?? String(index + 1);
-    const org = text(metadata.orgId) ?? text(firstScope.orgId);
     const fetchedAt = num(report.fetchedAt);
     if (fetchedAt === undefined) throw new Error('Invalid usage report timestamp');
     const plan = text(metadata.planType);
-    const account = { id: `${provider}:${identity}${org && org !== identity ? `:${org}` : ''}:${index + 1}`, provider,
+    const summaryIdentity = text(metadata.accountId) ?? text(firstScope.accountId) ?? text(metadata.email)
+      ?? text(metadata.orgId) ?? text(firstScope.orgId) ?? String(index + 1);
+    const org = text(metadata.orgId) ?? text(firstScope.orgId);
+    const summaryTieKey = `${provider}:${summaryIdentity}${org && org !== summaryIdentity ? `:${org}` : ''}:${index + 1}`;
+    const account = { id: accountId(provider, metadata, firstScope), summaryTieKey, provider,
       label: text(metadata.email) ?? text(metadata.accountName) ?? text(metadata.orgName) ?? `Account ${index + 1}`,
       fetchedAt, ...(plan ? { plan } : {}),
       notes: notes(report.notes), limits: /** @type {UsageLimit[]} */ ([]) };
@@ -91,7 +108,11 @@ export function normalizeUsage(payload, capturedAt = Date.now()) {
     if (!Array.isArray(entries)) continue;
     for (const entry of entries) {
       const item = obj(entry), provider = text(item.provider);
-      if (provider) snapshot.unavailable.push({ provider, label: text(item.email) ?? text(item.label) ?? text(item.accountId) ?? provider, reason });
+      if (!provider) continue;
+      snapshot.unavailable.push({
+        provider, label: text(item.email) ?? text(item.label) ?? text(item.accountId) ?? provider, reason,
+        ...(key === 'accountsWithoutUsage' ? { accountId: accountId(provider, item) } : {}),
+      });
     }
   }
   return snapshot;

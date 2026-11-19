@@ -706,7 +706,7 @@ private func runCompactSlotPlannerTests() {
               sides: [String: CompactWingSide] = [:],
               aliases: ExactConfigMap = [:], issue: String = "",
               connected: [String]? = nil) -> CompactSlotPlan {
-        CompactSlotPlanner.plan(cards: cards,
+        CompactSlotPlanner.plan(rings: cards.map { CompactRingPresentation(card: $0) },
                                 preferences: CompactPreferences(maximumVisibleSlots: max, selectedProviderIDs: selected,
                                                                 defaultSide: defaultSide, providerSides: sides),
                                 physicalCapacity: capacities ?? uniformCapacity(capacity),

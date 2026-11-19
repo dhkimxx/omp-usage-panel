@@ -687,7 +687,7 @@ final class GeneralSettingsWindowController: NSWindowController, NSWindowDelegat
 
         return card([
             sectionTitle("Compact view"),
-            hint("The compact row sits beside the notch. The maximum counts every compact control on both sides, including the More button; each provider chooses its own side."),
+            hint("Each account gets a ring. Select its provider and choose a side for all its rings. The maximum counts both sides, including the More button."),
             compactProfileLabel,
             maximumRow,
             error,

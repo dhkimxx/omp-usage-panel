@@ -315,7 +315,6 @@ final class CompactRingButton: CompactCircleButton {
     func update(_ presentation: CompactRingPresentation) {
         guard presentation != self.presentation else { return }
         self.presentation = presentation
-        identifier = NSUserInterfaceItemIdentifier(presentation.provider)
         title = presentation.label
         toolTip = presentation.tooltip
         setAccessibilityLabel(presentation.accessibilityLabel)
@@ -369,7 +368,7 @@ final class CompactRingButton: CompactCircleButton {
     }
 }
 
-// Circular +N count of providers that do not fit. It is a count, not a usage gauge.
+// +N counts rings that do not fit.
 final class CompactMoreButton: CompactCircleButton {
     private var presentation: CompactMorePresentation?
     private var countText = NSAttributedString(string: "")
@@ -377,7 +376,7 @@ final class CompactMoreButton: CompactCircleButton {
     func update(_ presentation: CompactMorePresentation) {
         guard presentation != self.presentation else { return }
         self.presentation = presentation
-        title = "More providers"
+        title = "More rings"
         toolTip = presentation.tooltip
         setAccessibilityLabel(presentation.accessibilityLabel)
         setAccessibilityHelp(presentation.tooltip)

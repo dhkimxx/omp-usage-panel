@@ -40,6 +40,7 @@ struct DashboardCard {
 
 struct DashboardContent {
     let cards: [DashboardCard]
+    let compactRings: [CompactRingPresentation]
     let status: String
     let footer: String
     let issue: String
@@ -64,7 +65,11 @@ enum DashboardModel {
         else if let error = result?.error, !error.isEmpty { statusParts.append(error) }
         let status = statusParts.joined(separator: " · ")
         let sourceIssue = !issue.isEmpty || result?.source == "stale" || result?.source == "unavailable" || !(result?.error ?? "").isEmpty
-        let cards = (result?.summaries ?? []).map { summary in
+        let snapshot = result?.snapshot
+        let accounts = Dictionary((snapshot?.accounts ?? []).lazy.map {
+            (DetailAccountKey.account(provider: $0.provider, id: $0.id), $0)
+        }, uniquingKeysWith: { first, _ in first })
+        func makeCard(_ summary: ProviderSummary) -> DashboardCard {
             let providerSource = result?.source(for: summary.provider)
             let providerIssue = providerSource.map { $0.source == "stale" || $0.source == "unavailable" || !($0.error ?? "").isEmpty } ?? sourceIssue
             let providerStatus = providerSource.map {
@@ -72,11 +77,8 @@ enum DashboardModel {
                 return [name, collecting ? "Refreshing…" : nil, issue.isEmpty ? nil : issue, $0.error]
                     .compactMap { $0 }.joined(separator: " · ")
             } ?? status
-            // Summary selection is authoritative. Never borrow a different account or limit's window.
-            let account = result?.snapshot?.accounts.first {
-                $0.provider == summary.provider && $0.id == summary.accountId
-            }
-            let limit = account?.limits.first { $0.id == summary.metricId }
+            let account = summary.accountId.flatMap { accounts[.account(provider: summary.provider, id: $0)] }
+            let limit = summary.metricId.flatMap { id in account?.limits.first { $0.id.isExactlyEqual(to: id) } }
             let window = limit?.window
             let metric = summary.metricLabel ?? limit?.label ?? summary.windowLabel ?? "Usage"
             let context: String
@@ -124,6 +126,22 @@ enum DashboardModel {
                                     summary.severity == "unknown" || summary.severity == "unavailable" ||
                                     summary.severity == "error" || !unavailable.isEmpty)
         }
+        let cards = (result?.summaries ?? []).map(makeCard)
+        let byProvider = Dictionary(cards.lazy.map { ($0.provider.exactKey, $0) }, uniquingKeysWith: { first, _ in first })
+        var compactRings: [CompactRingPresentation] = []
+        for summary in result?.compactGroups ?? [] {
+            if let accountSummaries = summary.accountSummaries {
+                for (index, account) in accountSummaries.enumerated() {
+                    compactRings.append(CompactRingPresentation(card: makeCard(account), accountID: account.accountId,
+                                                                accountLabel: account.accountLabel,
+                                                                number: accountSummaries.count > 1 ? index + 1 : nil))
+                }
+            } else {
+                let card = byProvider[summary.provider.exactKey] ?? makeCard(summary)
+                compactRings.append(CompactRingPresentation(card: card, accountID: summary.accountId,
+                                                            accountLabel: summary.accountLabel))
+            }
+        }
         var footer = "\(cards.count) \(cards.count == 1 ? "provider" : "providers")"
         if let snapshot = result?.snapshot {
             footer += " · \(snapshot.accounts.count) \(snapshot.accounts.count == 1 ? "account" : "accounts")"
@@ -131,7 +149,7 @@ enum DashboardModel {
         } else {
             footer += " · No snapshot available"
         }
-        return DashboardContent(cards: cards, status: status, footer: footer, issue: issue)
+        return DashboardContent(cards: cards, compactRings: compactRings, status: status, footer: footer, issue: issue)
     }
 
     private static func timestamp(_ milliseconds: Double, includeDate: Bool = true) -> String? {

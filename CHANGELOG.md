@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show separate rings for accounts in Compact view. Each ring opens that account directly and counts toward **Maximum slots**; the expanded Overview remains grouped by provider.
+
 - Add opt-in, file-only external usage snapshots with strict provider ownership, shared normalized validation, source-local freshness and partial-failure display. External data remains available when OMP fails; missing, invalid, expired and producer-error snapshots never invent zero quota or fresh timestamps.
 - Preserve `externalSources` through legacy configuration decoding, native Settings edits and atomic save/load; bundle the connector in the runtime.
 - Add the Antigravity label / AG compact mark without a provider-specific collector or new layout. Document the producer wire contract and passive statusline freshness limits.

@@ -39,6 +39,9 @@ func runExternalIntakeTests() {
     func cards(_ intake: UsageIntake, issue: String = "", collecting: Bool = false) -> [DashboardCard] {
         DashboardModel.make(result: intake.result, issue: issue, collecting: collecting, showPace: true).cards
     }
+    func rings(_ intake: UsageIntake) -> [CompactRingPresentation] {
+        DashboardModel.make(result: intake.result, issue: "", collecting: false, showPace: true).compactRings
+    }
 
     // F1: first-load OMP failure plus healthy external quota cannot confirm an external-only roster.
     for failedOMP in [collection(ompAt: nil, ompState: "unavailable"), collection(ompAt: 10000, ompState: "stale")] {
@@ -46,7 +49,7 @@ func runExternalIntakeTests() {
         precondition(intake.receive(.success(failedOMP)))
         precondition(intake.roster.known == nil && intake.roster.confirmedAt == nil, "a failed OMP first load must remain unconfirmed")
         precondition(ProviderDetailModel.reconciledScope(.provider("go"), connected: intake.roster.known) == .provider("go"))
-        let plan = CompactSlotPlanner.plan(cards: cards(intake),
+        let plan = CompactSlotPlanner.plan(rings: rings(intake),
                                            preferences: CompactPreferences(maximumVisibleSlots: 6, selectedProviderIDs: ["go", external]),
                                            physicalCapacity: CompactCapacities(left: 10, right: 10, total: 10), connectedProviders: intake.roster.known)
         precondition(plan.slots.contains { if case .provider(let ring) = $0 { return ring.provider == "go" && !ring.isReported }; return false },
@@ -72,6 +75,22 @@ func runExternalIntakeTests() {
         precondition(intake.result?.snapshot?.accounts.contains { $0.provider == "go" } == false)
         precondition(intake.result?.source(for: "mistral")?.source == "stale")
         precondition(!cards(intake).first { $0.provider == external }!.hasIssue, "OMP failure remains source-local")
+    }
+
+    // An Overview filter must not drop a retained OMP ring during a mixed-source refresh.
+    do {
+        var intake = UsageIntake()
+        func hideOMP(_ input: PanelResult) -> PanelResult {
+            PanelResult(snapshot: input.snapshot, source: input.source, error: input.error,
+                summaries: input.summaries.filter { $0.provider == external },
+                providerSources: input.providerSources, ompSource: input.ompSource, compactSummaries: input.summaries)
+        }
+        intake.receive(.success(hideOMP(collection(ompAt: 20000, ompPercent: 40))))
+        intake.receive(.success(hideOMP(collection(ompAt: 10000, ompState: "cache", ompPercent: 10,
+                                                   externalAt: 30000, externalPercent: 80))))
+        precondition(cards(intake).map(\.provider) == [external])
+        precondition(rings(intake).first { $0.provider == "mistral" }?.arc == .fraction(0.4))
+        precondition(rings(intake).first { $0.provider == external }?.arc == .fraction(0.8))
     }
 
     // Empty OMP rosters retain their clock; healthy OMP confirms even if an external source fails.
@@ -110,7 +129,7 @@ func runExternalIntakeTests() {
         let preferences = CompactPreferences(maximumVisibleSlots: 6, selectedProviderIDs: ["mistral", "go", external],
                                              providerSides: ["mistral": .left])
         let capacity = CompactCapacities(left: 10, right: 10, total: 10)
-        let plan = CompactSlotPlanner.plan(cards: cards(intake), preferences: preferences,
+        let plan = CompactSlotPlanner.plan(rings: rings(intake), preferences: preferences,
                                            physicalCapacity: capacity, connectedProviders: intake.roster.known)
         precondition(!plan.slots.contains { if case .provider(let ring) = $0 { return ring.provider == "mistral" }; return false },
                      "a confirmed OMP removal must not leave a compact placeholder during AG staleness")
@@ -126,7 +145,7 @@ func runExternalIntakeTests() {
         // Configured external membership survives an unavailable file, and saved OMP selections reconnect on their original side.
         intake.receive(.success(collection(ompAt: 24000, providers: ["mistral", "go"], externalAt: nil, externalState: "unavailable")))
         precondition(intake.roster.known == Set(["mistral", "go", external].map(\.exactKey)) && intake.roster.confirmedAt == 24000)
-        let reconnected = CompactSlotPlanner.plan(cards: cards(intake), preferences: preferences,
+        let reconnected = CompactSlotPlanner.plan(rings: rings(intake), preferences: preferences,
                                                   physicalCapacity: capacity, connectedProviders: intake.roster.known)
         precondition(reconnected.slots.contains { if case .provider(let ring) = $0 { return ring.provider == "mistral" && ring.isReported }; return false })
         precondition(preferences.side(for: "mistral") == .left)

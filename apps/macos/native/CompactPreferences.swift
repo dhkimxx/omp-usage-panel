@@ -65,14 +65,14 @@ struct CompactPreferences: Codable, Equatable {
                                   defaultSide: defaultSide, providerSides: providerSides)
     }
 
-    /// Human summary of how `selectedCount` providers fit into `maximum` total slots (More occupies one slot).
+    /// More uses one of the slots shared by the selected rings.
     static func capacitySummary(selectedCount: Int, maximum: Int) -> String {
         let slots = max(1, maximum)
         let count = max(0, selectedCount)
         if count == 0 { return "No providers selected. The compact row shows a + button to open these settings." }
-        if count <= slots { return "\(count) of \(slots) slots used: every selected provider gets its own ring." }
+        if count <= slots { return "\(count) of \(slots) slots used before screen limits." }
         if slots == 1 { return "1 slot: only a More button (+\(count)) is shown." }
-        return "\(count) selected, \(slots) slots: \(slots - 1) rings plus More +\(count - slots + 1)."
+        return "\(count) rings selected, \(slots) slots: \(slots - 1) rings plus More +\(count - slots + 1)."
     }
 }
 
@@ -81,12 +81,14 @@ struct CompactProviderChoice: Equatable {
     let label: String
     let detail: String?
     let isReported: Bool
+    let ringCount: Int
 
-    init(id: String, label: String, detail: String? = nil, isReported: Bool = true) {
+    init(id: String, label: String, detail: String? = nil, isReported: Bool = true, ringCount: Int = 1) {
         self.id = id
         self.label = label
         self.detail = detail
         self.isReported = isReported
+        self.ringCount = ringCount
     }
 }
 

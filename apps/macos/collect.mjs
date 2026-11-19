@@ -11,7 +11,8 @@ export async function collect(args) {
   const config = parseConfig(JSON.parse(await readFile(args[1], 'utf8')))
   const omp = await collectUsage({ ompBin: config.ompPath, profile: config.profile, maxAgeMs: config.cacheMinutes * 60000, timeoutMs: config.timeoutSeconds * 1000, force: args.length === 3 })
   const result = await mergeExternalSources(omp, config.externalSources, { maxAgeMs: config.cacheMinutes * 60000 })
-  return { ...result, summaries: summarizeProviders(result, config) }
+  return { ...result, summaries: summarizeProviders(result, config),
+    ...(config.providers === null ? {} : { compactSummaries: summarizeProviders(result, { ...config, providers: null }) }) }
 }
 
 if (import.meta.main) {
