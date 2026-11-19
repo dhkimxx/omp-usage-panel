@@ -12,16 +12,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         switch SetupLaunch.route(arguments: CommandLine.arguments, bundlePath: Bundle.main.bundlePath, home: home, resolve: SetupLaunch.resolvingSymlinks) {
         case .normal(let configPath): startPanel(configPath: configPath)
-        case .usage: fail("Usage: OMPUsagePanel [--config path]")
+        case .usage: Self.finish(SetupInstallReport(exitCode: 2, stdout: nil, stderr: SetupLaunch.usageText))
         case .setup: showSetup(home: home, notice: nil)
         case .managedHandoff: handOff(home: home)
+        case .install(let omp, let profile): install(home: home, omp: omp, profile: profile)
         }
+    }
+
+    /// Headless `--install`: no window, menu, panel or updater. Every path ends in `exit`, and the helper install is
+    /// never signalled (the runner waits for its real exit), so there is no hang and no half-killed transaction.
+    private func install(home: String, omp: String?, profile: String?) {
+        let existing = SetupExistingConfig.read(path: SetupLaunch.defaultConfigPath(home: home))
+        let discovery = SetupDiscoveryEnvironment(home: home, path: ProcessInfo.processInfo.environment["PATH"])
+        let plan = SetupInstallCLI.plan(omp: omp, profile: profile, existing: existing, discovery: discovery,
+                                        sourceAppPath: Bundle.main.bundlePath, hostPid: Int(ProcessInfo.processInfo.processIdentifier))
+        switch plan {
+        case .stop(let report): Self.finish(report)
+        case .run(let request, let ompPath, let notes):
+            for note in notes { FileHandle.standardError.write(Data((note + "\n").utf8)) }
+            setupRunner.run(command: .install, ompPath: ompPath, helperPath: helperPath, request: request, timeout: SetupRunner.installNoticeDelay) { result in
+                Self.finish(SetupInstallCLI.report(for: result))
+            }
+        }
+    }
+
+    private static func finish(_ report: SetupInstallReport) -> Never {
+        if let line = report.stdout { FileHandle.standardOutput.write(Data((line + "\n").utf8)) }
+        if let line = report.stderr { FileHandle.standardError.write(Data((line + "\n").utf8)) }
+        exit(report.exitCode)
     }
 
     private func startPanel(configPath: String) {
         do {
             let configStore = try PanelConfigStore(configPath: configPath)
-            let coordinator = UpdaterCoordinator(config: configStore.config, configPath: configStore.configPath)
+            let coordinator = UpdaterCoordinator(configPath: configStore.configPath)
             let panel = PanelController(configStore: configStore, updater: coordinator)
             updater = coordinator; controller = panel
             panel.start()
@@ -53,8 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showSetup(home: home, notice: existing == .none ? "OMP Usage is not set up for this account yet." : "OMP Usage could not start from its saved configuration. Review the details below.")
             return
         }
-        let request = SetupRequest(sourceAppPath: Bundle.main.bundlePath, hostPid: Int(ProcessInfo.processInfo.processIdentifier), nodePath: nil, ompPath: nil, profile: nil)
-        setupRunner.run(command: .launch, nodePath: config.nodePath, ompPath: config.ompPath, helperPath: helperPath, request: request, timeout: SetupRunner.launchTimeout) { [weak self] result in
+        let request = SetupRequest(sourceAppPath: Bundle.main.bundlePath, hostPid: Int(ProcessInfo.processInfo.processIdentifier), ompPath: nil, profile: nil)
+        // The bundled Node is resolved (and extracted on first use) off the main thread inside the runner.
+        setupRunner.run(command: .launch, ompPath: config.ompPath, helperPath: helperPath, request: request, timeout: SetupRunner.launchTimeout) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let success):
@@ -88,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let setup { return setup.applicationShouldTerminate() }
         return updater?.applicationShouldTerminate() ?? .terminateNow
     }
-    func applicationWillTerminate(_ notification: Notification) { controller?.stop(); updater?.stop(); setup?.shutdown() }
+    func applicationWillTerminate(_ notification: Notification) { controller?.stop(); updater?.stop() }
     private func fail(_ message: String) {
         let alert = NSAlert(); alert.messageText = "OMP Usage Panel"; alert.informativeText = message; alert.runModal(); NSApp.terminate(nil)
     }

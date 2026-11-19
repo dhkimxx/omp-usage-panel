@@ -242,6 +242,27 @@ func runDockModelTests() {
     precondition(layout(invalidAux, .expanded).mode == .floating)
     precondition(DockGeometry.compactCapacities(screen: falseNotch) == DockGeometry.compactCapacities(screen: noNotch))
 
+    // The lock and geometry share measured notch eligibility, including a transient incomplete wake snapshot.
+    precondition(DockGeometry.hasNotch(in: screen))
+    precondition(!DockGeometry.hasNotch(in: falseNotch) && !DockGeometry.hasNotch(in: invalidAux))
+    precondition(!DockGeometry.hasNotch(in: noNotch))
+    let lockedPreferences = PanelPlacementPreferences(displayUUID: "MEASURED-DISPLAY", lockToNotch: true)
+    let savedManual = PanelManualPlacement(topCenter: CGPoint(x: -500, y: 400), anchor: nil)
+    for metrics in [screen, invalidAux, screen] {
+        let measured = DockGeometry.hasNotch(in: metrics)
+        let display = PlacementDisplay(uuid: lockedPreferences.displayUUID, frame: metrics.frame, isPrimary: true,
+                                       name: "Measured display", hasNotch: measured)
+        let resolution = PanelPlacementResolver.resolve(preferences: lockedPreferences, manual: savedManual,
+                                                        legacyPoint: nil, displays: [display])!
+        precondition(resolution.isNotchLocked == measured)
+        precondition(resolution.manualTopCenter == (measured ? nil : savedManual.topCenter))
+        for presentation in [DockPresentation.compact, .expanded] {
+            let result = layout(metrics, presentation, resolution.manualTopCenter, left: 2, right: 1)
+            precondition(result.mode == (measured ? .notchConnected : .floating))
+            bounded(result, metrics)
+        }
+    }
+
     for point in [CGPoint(x: -2000, y: 2000), CGPoint(x: 500, y: -500), CGPoint(x: -500, y: 300)] {
         let a = layout(screen, .compact, point, left: 1, right: 2)
         let b = layout(screen, .expanded, point, left: 1, right: 2)

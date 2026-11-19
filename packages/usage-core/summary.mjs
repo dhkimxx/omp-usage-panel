@@ -6,7 +6,7 @@
 
 const order = ['openai-codex', 'opencode-go', 'minimax-code-cn', 'commandcode', 'mistral']
 /** @type {Record<string,string>} */
-const aliases = { 'openai-codex': 'Codex', 'opencode-go': 'Go', 'minimax-code-cn': 'MiniMax CN', commandcode: 'Cmd', mistral: 'Mistral' }
+const aliases = { 'openai-codex': 'Codex', 'opencode-go': 'Go', 'minimax-code-cn': 'MiniMax CN', commandcode: 'Cmd', mistral: 'Mistral', 'google-antigravity': 'Antigravity' }
 /** @param {string} value */
 function clean(value) { return value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim() }
 /** @param {number} percent @param {{warnPercent?:number,criticalPercent?:number}} [thresholds] */
@@ -23,7 +23,7 @@ export function formatPercent(percent, thresholds = {}) {
 /** @param {Candidate} a @param {Candidate} b */
 function compareIdentity(a, b) {
   if (a.limit.id !== b.limit.id) return a.limit.id < b.limit.id ? -1 : 1
-  const x = a.account.summaryTieKey, y = b.account.summaryTieKey
+  const x = a.account.summaryTieKey ?? a.account.id, y = b.account.summaryTieKey ?? b.account.id
   return x < y ? -1 : x > y ? 1 : 0
 }
 /** @param {CollectionResult} result @param {SummarySettings} settings @returns {ProviderSummary[]} */
@@ -35,16 +35,18 @@ export function summarizeProviders(result, settings) {
     const matching = accounts.filter(account => account.provider === provider)
     const failed = unavailable.filter(item => item.provider === provider)
     const hasUnavailable = failed.length > 0
-    const summary = summarize(provider, matching, settings, hasUnavailable)
+    const sourceNotes = result.providerSources?.filter(item => item.provider === provider && (item.source === 'stale' || item.source === 'unavailable'))
+      .map(item => `${item.source === 'stale' ? 'Stale data' : 'Unavailable'}${item.error ? `: ${item.error}` : ''}`) ?? []
+    const summary = summarize(provider, matching, settings, hasUnavailable, sourceNotes)
     if (matching.length > 1 || (matching.length === 1 && summary.accountId === null)
         || failed.some(item => item.accountId !== undefined)) {
       const accountSummaries = matching.map(account => ({
-        ...summarize(provider, [account], settings, hasUnavailable), accountId: account.id, accountLabel: clean(account.label),
+        ...summarize(provider, [account], settings, hasUnavailable, sourceNotes), accountId: account.id, accountLabel: clean(account.label),
       }))
       for (const item of failed) {
         if (item.accountId === undefined) continue
         accountSummaries.push({
-          ...summarize(provider, [], settings, true), accountId: item.accountId, accountLabel: clean(item.label),
+          ...summarize(provider, [], settings, true, sourceNotes), accountId: item.accountId, accountLabel: clean(item.label),
         })
       }
       summary.accountSummaries = accountSummaries.sort((a, b) => a.accountId < b.accountId ? -1 : a.accountId > b.accountId ? 1 : 0)
@@ -54,8 +56,8 @@ export function summarizeProviders(result, settings) {
 }
 
 /** @param {string} provider @param {UsageAccount[]} accounts @param {SummarySettings} settings
- * @param {boolean} hasUnavailable @returns {ProviderSummary} */
-function summarize(provider, accounts, settings, hasUnavailable) {
+ * @param {boolean} hasUnavailable @param {string[]} sourceNotes @returns {ProviderSummary} */
+function summarize(provider, accounts, settings, hasUnavailable, sourceNotes) {
   let metricFound = false
   const metric = Object.hasOwn(settings.metrics, provider) ? settings.metrics[provider] : undefined
   /** @type {Candidate[]} */ const numeric = []
@@ -77,5 +79,6 @@ function summarize(provider, accounts, settings, hasUnavailable) {
   return { provider, label: clean(label), percent, value: percent === null ? '—' : formatPercent(percent, settings), severity,
     accountCount: accounts.length, accountId: selected?.account.id ?? null, accountLabel: selected ? clean(selected.account.label) : null,
     metricId: selected?.limit.id ?? null, metricLabel: selected ? clean(selected.limit.label) : null, windowLabel: selected?.limit.window ? clean(selected.limit.window.label) : null,
-    notes: [...(metric !== undefined && !metricFound ? ['Configured metric not found'] : []), ...(hasUnavailable ? ['Some usage data is unavailable'] : [])] }
+    notes: [...(metric !== undefined && !metricFound ? ['Configured metric not found'] : []),
+      ...(hasUnavailable ? ['Some usage data is unavailable'] : []), ...sourceNotes] }
 }

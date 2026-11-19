@@ -152,7 +152,7 @@ struct GeneralSettingsDraft: Equatable {
     enum RowList: CaseIterable, Hashable { case providers, labels, metrics }
 
     enum Field: Hashable {
-        case nodePath, ompPath, profile
+        case ompPath, profile
         case refreshSeconds, cacheMinutes, timeoutSeconds, warnPercent, criticalPercent
         case providers, labels, metrics
         /// Staged total compact slots of the currently edited compact profile.
@@ -160,7 +160,6 @@ struct GeneralSettingsDraft: Equatable {
 
         init?(configKey: String) {
             switch configKey {
-            case "nodePath": self = .nodePath
             case "ompPath": self = .ompPath
             case "profile": self = .profile
             case "refreshSeconds": self = .refreshSeconds
@@ -269,7 +268,11 @@ struct GeneralSettingsDraft: Equatable {
     // MARK: State
 
     let version: Int
-    var nodePath: String
+    /// The configuration's legacy Node path: no longer user-editable (every Node process runs from the bundled
+    /// runtime), carried through unchanged so Settings save preserves it exactly.
+    let nodePath: String
+    /// File-based opt-ins are configured outside Settings and must survive every Save unchanged.
+    let externalSources: [ExternalSource]
     var ompPath: String
     var profile: String
     var refreshSeconds: String
@@ -297,6 +300,7 @@ struct GeneralSettingsDraft: Equatable {
         self.placement = placement
         version = config.version
         nodePath = config.nodePath
+        externalSources = config.externalSources
         ompPath = config.ompPath
         profile = config.profile
         refreshSeconds = Self.format(config.refreshSeconds)
@@ -320,7 +324,7 @@ struct GeneralSettingsDraft: Equatable {
     func hasChanges(from config: PanelConfig, updatePolicy committedPolicy: UpdatePolicy, placement committedPlacement: PanelPlacementPreferences = .defaults) -> Bool {
         let base = GeneralSettingsDraft(config: config, updatePolicy: committedPolicy, placement: committedPlacement)
         func values(_ rows: [Row]) -> [[String]] { rows.map { [$0.key, $0.value] } }
-        return nodePath != base.nodePath || ompPath != base.ompPath || profile != base.profile
+        return nodePath != base.nodePath || externalSources != base.externalSources || ompPath != base.ompPath || profile != base.profile
             || refreshSeconds != base.refreshSeconds || cacheMinutes != base.cacheMinutes
             || timeoutSeconds != base.timeoutSeconds || warnPercent != base.warnPercent
             || criticalPercent != base.criticalPercent || showPace != base.showPace
@@ -376,7 +380,6 @@ struct GeneralSettingsDraft: Equatable {
 
     func text(for field: Field) -> String {
         switch field {
-        case .nodePath: return nodePath
         case .ompPath: return ompPath
         case .profile: return profile
         case .refreshSeconds: return refreshSeconds
@@ -391,7 +394,6 @@ struct GeneralSettingsDraft: Equatable {
 
     mutating func setText(_ text: String, for field: Field) {
         switch field {
-        case .nodePath: nodePath = text
         case .ompPath: ompPath = text
         case .profile: profile = text
         case .refreshSeconds: refreshSeconds = text
@@ -462,7 +464,6 @@ struct GeneralSettingsDraft: Equatable {
         var issues: [Issue] = []
         func report(_ field: Field, _ message: String, row rowID: Int? = nil) { issues.append(Issue(field: field, rowID: rowID, message: message)) }
 
-        if PanelConfig.isBlank(nodePath) || !nodePath.hasPrefix("/") { report(.nodePath, "Enter an absolute path starting with /.") }
         if PanelConfig.isBlank(ompPath) || !ompPath.hasPrefix("/") { report(.ompPath, "Enter an absolute path starting with /.") }
         if PanelConfig.isBlank(profile) { report(.profile, "Enter a profile name.") }
 
@@ -513,13 +514,13 @@ struct GeneralSettingsDraft: Equatable {
         let config = PanelConfig(version: version, nodePath: nodePath, ompPath: ompPath, profile: profile,
                                  refreshSeconds: refresh, cacheMinutes: cache, timeoutSeconds: timeout,
                                  providers: providers, labels: labels, metrics: metrics,
-                                 warnPercent: warn, criticalPercent: critical, showPace: showPace)
+                                 warnPercent: warn, criticalPercent: critical, showPace: showPace, externalSources: externalSources)
         do { try config.validate() }
         catch let error as PanelConfigError {
             if case .invalid(let key, let rule) = error {
-                throw Failure(issues: [Issue(field: Field(configKey: key) ?? .nodePath, rowID: nil, message: "Invalid value: \(rule).")])
+                throw Failure(issues: [Issue(field: Field(configKey: key) ?? .ompPath, rowID: nil, message: "Invalid value: \(rule).")])
             }
-            throw Failure(issues: [Issue(field: .nodePath, rowID: nil, message: error.localizedDescription)])
+            throw Failure(issues: [Issue(field: .ompPath, rowID: nil, message: error.localizedDescription)])
         }
         return config
     }
@@ -551,7 +552,36 @@ struct GeneralSettingsDraft: Equatable {
 
     /// Stages the monitor choice: `nil` follows the System primary display, a UUID pins that physical monitor.
     /// Selecting the UUID of the current primary display is deliberately distinct from `nil`.
-    mutating func selectMonitor(uuid: String?) { placement.displayUUID = uuid }
+    /// A saved System-primary lock remains lossless until the user chooses a named target. That transition
+    /// resets the inactive lock, so choosing a monitor cannot unexpectedly enable it.
+    mutating func selectMonitor(uuid: String?) {
+        let selected = PanelDisplayIdentity.normalize(uuid)
+        if !canEditNotchLock, selected != nil { placement.lockToNotch = false }
+        placement.displayUUID = selected
+    }
+
+    var canEditNotchLock: Bool { PanelDisplayIdentity.normalize(placement.displayUUID) != nil }
+
+    func notchLockHint(choices: [PanelDisplayChoice]) -> String {
+        guard let uuid = PanelDisplayIdentity.normalize(placement.displayUUID) else {
+            return placement.lockToNotch
+                ? "Inactive for System primary. Saved lock is on; choosing a named monitor resets it to Off."
+                : "Choose a named monitor to enable notch lock."
+        }
+        guard let choice = choices.first(where: { $0.uuid == uuid }) else {
+            return placement.lockToNotch
+                ? "Inactive: monitor disconnected. Lock resumes when its measured notch is available."
+                : "Inactive: monitor disconnected. Lock needs a connected monitor with a measured notch."
+        }
+        guard choice.hasNotch else {
+            return placement.lockToNotch
+                ? "Inactive: no camera-safe notch measured on this monitor. Lock choice is kept."
+                : "Inactive: no camera-safe notch measured on this monitor."
+        }
+        return placement.lockToNotch
+            ? "Enabled: locks to this monitor's measured notch."
+            : "Off: enable to lock to this monitor's measured notch."
+    }
 
     func monitorOptions(choices: [PanelDisplayChoice]) -> [PlacementMonitorOption] {
         PlacementMonitorOption.options(selected: placement.displayUUID, choices: choices)

@@ -67,23 +67,15 @@ function fixture() {
   const download = makeApp(path.join(home, 'Downloads/OMP Usage.app'))
   const tools = path.join(home, 'tools'), node = path.join(tools, 'node'), omp = path.join(tools, 'omp')
   put(tools, 'node', '#!/bin/sh\n', 0o755); put(tools, 'omp', '#!/bin/sh\n', 0o755)
-  /** What each runnable Node reports for --version; anything else cannot run. */
-  const versions = new Map([[node, 'v22.23.4'], [process.execPath, 'v22.18.0']])
   let loaded = false, pid = 0, foreign = false, failStart = false, signature = true, starts = 0, stops = 0, kicks = 0
   /** @type {(()=>void)|null} */
-  let onVersion = null
+  let onSignature = null
   /** @type {{file:string, args:string[]}[]} */
   const commands = []
   /** A launchd that models what the helper may touch: loaded/idle/running jobs, never -k, and nothing else. @param {string} file @param {string[]} args */
   function run(file, args) {
     commands.push({ file, args })
-    if (args[0] === '--version') {
-      const version = versions.get(file)
-      if (version === undefined) throw new Error(`${file} cannot run`)
-      onVersion?.()
-      return `${version}\n`
-    }
-    if (file === '/usr/bin/codesign') { if (!signature) throw new Error('invalid signature'); return '' }
+    if (file === '/usr/bin/codesign') { onSignature?.(); if (!signature) throw new Error('invalid signature'); return '' }
     if (file === '/bin/launchctl') {
       if (args[0] === 'print') {
         // Only the app's own job exists; Sparkle's host-specific installer jobs are absent unless a test says otherwise.
@@ -99,7 +91,7 @@ function fixture() {
   }
   const options = { home, platform: 'darwin', run, uid: 123, sleep() {}, bundle: download }
   /** @param {Record<string,unknown>} [extra] */
-  const request = (extra = {}) => ({ sourceAppPath: download, hostPid: HOST, nodePath: node, ompPath: omp, profile: 'work', ...extra })
+  const request = (extra = {}) => ({ sourceAppPath: download, hostPid: HOST, ompPath: omp, profile: 'work', ...extra })
   /** @param {Record<string,unknown>} [extra] @param {Partial<import('./setup-install.mjs').SetupOptions>} [more] */
   const setup = (extra, more) => execute('install', request(extra), { ...options, ...more })
   /** The Finder launch of the app at `bundle`, from the process `hostPid`. @param {string} bundle @param {number} [hostPid] */
@@ -108,12 +100,12 @@ function fixture() {
   const verbs = from => commands.slice(from).filter(command => command.file === '/bin/launchctl').map(command => command.args[0])
   const manifest = () => JSON.parse(readFileSync(stateFile, 'utf8'))
   return {
-    home, stateDir, config, stateFile, app, agent, download, node, omp, versions, commands, options, request, setup, launch, verbs, manifest,
+    home, stateDir, config, stateFile, app, agent, download, node, omp, commands, options, request, setup, launch, verbs, manifest,
     isLoaded: () => loaded, jobPid: () => pid, starts: () => starts, stops: () => stops, kicks: () => kicks,
     quit() { pid = 0 }, unload() { loaded = false; pid = 0 }, foreignJob() { foreign = true; loaded = true; pid = 0 },
     failNextStart() { failStart = true }, breakSignature() { signature = false },
     /** @param {()=>void} hook */
-    whenNodeRuns(hook) { onVersion = hook },
+    whenSignatureChecked(hook) { onSignature = hook },
     /** A new release replaces the download. @param {string} version */
     release(version) { rmSync(download, { recursive: true }); makeApp(download, version) },
     /** Everything that is not the install itself: leftovers beside the app. */
@@ -139,7 +131,7 @@ it('installs the prebuilt app from an uncanonical copy, creates the configuratio
     assert.equal(appTreeHash(f.app), hash); assert.equal(appTreeHash(f.download), hash)
     assert.equal(statSync(path.join(f.app, 'Contents/MacOS/OMPUsagePanel')).mode & 0o777, 0o755)
     assert.deepEqual(f.manifest(), { version: 2, appPath: f.app, agentPath: f.agent, appHash: hash, agentHash: digest(readFileSync(f.agent)) })
-    assert.deepEqual(JSON.parse(readFileSync(f.config, 'utf8')), defaultConfig({ nodePath: f.node, ompPath: f.omp, profile: 'work' }))
+    assert.deepEqual(JSON.parse(readFileSync(f.config, 'utf8')), defaultConfig({ nodePath: process.execPath, ompPath: f.omp, profile: 'work' }))
     assert.equal(statSync(f.config).mode & 0o777, 0o600)
     assert.equal(f.isLoaded(), true); assert.equal(f.starts(), 1); assert.deepEqual(f.leftovers(), [])
     // The signature that was verified is the installed copy's, never the source's.
@@ -150,10 +142,10 @@ it('installs the prebuilt app from an uncanonical copy, creates the configuratio
     assert.equal(f.commands.some(command => command.args[0] === 'plugin'), false)
   } finally { f.cleanup() }
 })
-it('uses the helper\'s own Node when the request names none, and the shared uninstall removes what setup installed', () => {
+it('records the helper\'s own Node in a fresh configuration, and the shared uninstall removes what setup installed', () => {
   const f = fixture()
   try {
-    f.setup({ nodePath: undefined })
+    f.setup()
     assert.equal(JSON.parse(readFileSync(f.config, 'utf8')).nodePath, process.execPath)
     const original = readFileSync(f.config, 'utf8')
     uninstall(f.options)
@@ -208,14 +200,6 @@ it('refuses a copy whose signature does not verify before replacing or creating 
   const f = fixture()
   try {
     f.breakSignature()
-    assert.equal(failure(() => f.setup()).code, 'invalid-source')
-    assertNothingInstalled(f); assert.equal(existsSync(f.config), false)
-  } finally { f.cleanup() }
-})
-it('refuses a source that changes after it was verified: the copy must equal the verified tree', () => {
-  const f = fixture()
-  try {
-    f.whenNodeRuns(() => writeFileSync(path.join(f.download, 'Contents/Resources/LICENSE'), 'changed after verification'))
     assert.equal(failure(() => f.setup()).code, 'invalid-source')
     assertNothingInstalled(f); assert.equal(existsSync(f.config), false)
   } finally { f.cleanup() }
@@ -415,9 +399,8 @@ it('keeps a valid existing configuration byte for byte and lets its paths and pr
     const bytes = JSON.stringify({ ...defaultConfig({ nodePath: f.node, ompPath: f.omp, profile: 'existing' }), refreshSeconds: 30 }, null, 4) + '\n'
     mkdirSync(f.stateDir, { recursive: true }); writeFileSync(f.config, bytes)
     // The request's values are never consulted, not even validated against the filesystem, while a valid configuration exists.
-    f.setup({ nodePath: '/does/not/exist/node', ompPath: '/does/not/exist/omp', profile: 'other' })
+    f.setup({ ompPath: '/does/not/exist/omp', profile: 'other' })
     assert.equal(readFileSync(f.config, 'utf8'), bytes)
-    assert.equal(f.commands.some(command => command.args[0] === '--version' && command.file === f.node), true)
     // Retained across a later install too, and across uninstall.
     f.quit(); f.setup({}); uninstall(f.options)
     assert.equal(readFileSync(f.config, 'utf8'), bytes)
@@ -439,13 +422,18 @@ it('refuses an invalid or unreadable existing configuration without overwriting 
     assertNothingInstalled(f)
   } finally { f.cleanup() }
 })
-it('reports an existing configuration whose Node cannot run instead of replacing it', () => {
+it('installs, launches and keeps an existing configuration byte for byte even when its legacy Node path no longer exists', () => {
   const f = fixture()
   try {
     const bytes = JSON.stringify(defaultConfig({ nodePath: path.join(f.home, 'tools/missing-node'), ompPath: f.omp }), null, 2) + '\n'
     mkdirSync(f.stateDir, { recursive: true }); writeFileSync(f.config, bytes)
-    assert.equal(failure(() => f.setup()).code, 'node-unavailable')
-    assert.equal(readFileSync(f.config, 'utf8'), bytes); assertNothingInstalled(f)
+    f.setup()
+    assert.equal(readFileSync(f.config, 'utf8'), bytes)
+    assert.equal(existsSync(f.app), true); assert.equal(f.isLoaded(), true)
+    f.quit()
+    assert.deepEqual(f.launch(f.app), { action: 'relaunch', appPath: f.app, configPath: f.config })
+    assert.equal(readFileSync(f.config, 'utf8'), bytes)
+    assert.equal(f.commands.some(command => command.args[0] === '--version'), false)
   } finally { f.cleanup() }
 })
 it('accepts an existing valid configuration whose omp is missing, retaining it byte for byte', () => {
@@ -453,8 +441,8 @@ it('accepts an existing valid configuration whose omp is missing, retaining it b
   try {
     const bytes = JSON.stringify(defaultConfig({ nodePath: f.node, ompPath: path.join(f.home, 'tools/missing-omp'), profile: 'existing' }), null, 2) + '\n'
     mkdirSync(f.stateDir, { recursive: true }); writeFileSync(f.config, bytes)
-    // Setup needs only a usable Node. The authoritative configuration's omp and profile are neither validated nor rewritten.
-    f.setup({ nodePath: undefined, ompPath: undefined, profile: undefined })
+    // Setup needs no omp: the authoritative configuration's omp and profile are neither validated nor rewritten.
+    f.setup({ ompPath: undefined, profile: undefined })
     assert.equal(readFileSync(f.config, 'utf8'), bytes)
     assert.equal(existsSync(f.app), true); assert.equal(f.isLoaded(), true); assert.equal(f.manifest().appHash, appTreeHash(f.app))
   } finally { f.cleanup() }
@@ -463,24 +451,19 @@ it('never overwrites a configuration that appears while the install is running',
   const f = fixture()
   try {
     // The configuration is absent when setup decides to create it and present when it is about to be written.
-    f.whenNodeRuns(() => writeFileSync(f.config, 'created meanwhile'))
+    f.whenSignatureChecked(() => writeFileSync(f.config, 'created meanwhile'))
     assert.equal(failure(() => f.setup()).code, 'config-changed')
     assert.equal(readFileSync(f.config, 'utf8'), 'created meanwhile'); assertNothingInstalled(f)
   } finally { f.cleanup() }
 })
 
-it('validates the Node, omp and profile choices before anything is created', () => {
+it('validates the omp and profile choices before anything is created', () => {
   const f = fixture()
   try {
-    const old = path.join(f.home, 'tools/node20'), plain = path.join(f.home, 'tools/data')
-    put(f.home, 'tools/node20', '#!/bin/sh\n', 0o755); put(f.home, 'tools/data', 'data', 0o644)
-    f.versions.set(old, 'v20.11.0')
-    put(f.download, 'Contents/Resources/node', '#!/bin/sh\n', 0o755); f.versions.set(path.join(f.download, 'Contents/Resources/node'), 'v22.23.4')
+    const plain = path.join(f.home, 'tools/data')
+    put(f.home, 'tools/data', 'data', 0o644)
     /** @type {[Record<string,unknown>, string][]} */
     const cases = [
-      [{ nodePath: 'node' }, 'node-unavailable'], [{ nodePath: '/a/../b/node' }, 'node-unavailable'], [{ nodePath: `${f.node}/` }, 'node-unavailable'],
-      [{ nodePath: path.join(f.home, 'tools/missing') }, 'node-unavailable'], [{ nodePath: path.join(f.home, 'tools') }, 'node-unavailable'], [{ nodePath: plain }, 'node-unavailable'],
-      [{ nodePath: old }, 'node-unavailable'], [{ nodePath: path.join(f.download, 'Contents/Resources/node') }, 'node-unavailable'],
       [{ ompPath: 'omp' }, 'omp-unavailable'], [{ ompPath: path.join(f.home, 'tools/missing') }, 'omp-unavailable'], [{ ompPath: path.join(f.home, 'tools') }, 'omp-unavailable'], [{ ompPath: plain }, 'omp-unavailable'],
       [{ profile: '' }, 'invalid-profile'], [{ profile: '   ' }, 'invalid-profile'], [{ profile: 'bad\nname' }, 'invalid-profile'],
     ]
@@ -499,7 +482,7 @@ it('accepts only the strict request fields and only from the app that contains t
       ['install', f.request({ extra: 1 }), 'invalid-request'], ['launch', { sourceAppPath: f.app, hostPid: HOST, nodePath: f.node }, 'invalid-request'],
       ['install', f.request({ sourceAppPath: 'relative/OMP Usage.app' }), 'invalid-request'], ['install', f.request({ sourceAppPath: undefined }), 'invalid-request'],
       ['install', f.request({ hostPid: 1 }), 'invalid-request'], ['install', f.request({ hostPid: '4001' }), 'invalid-request'], ['install', f.request({ hostPid: 1.5 }), 'invalid-request'], ['install', f.request({ hostPid: undefined }), 'invalid-request'],
-      ['install', f.request({ nodePath: 5 }), 'invalid-request'], ['install', f.request({ profile: null }), 'invalid-request'],
+      ['install', f.request({ nodePath: f.node }), 'invalid-request'], ['install', f.request({ nodePath: process.execPath }), 'invalid-request'], ['install', f.request({ profile: null }), 'invalid-request'],
       ['install', [], 'invalid-request'], ['install', null, 'invalid-request'], ['upgrade', f.request(), 'invalid-request'],
       ['install', f.request({ sourceAppPath: other }), 'source-mismatch'], ['install', f.request({ sourceAppPath: path.join(f.home, 'Downloads/Missing.app') }), 'source-mismatch'],
       ['install', f.request({ sourceAppPath: path.dirname(f.download) }), 'source-mismatch'],
@@ -580,7 +563,7 @@ it('runs out of the repository from the packaged runtime alone and refuses every
       const result = spawnSync(process.execPath, [file, command], { input: typeof input === 'string' ? input : JSON.stringify(input), encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, HOME: home, NODE_PATH: '' } })
       return { status: result.status, payload: JSON.parse(result.stdout) }
     }
-    const request = { sourceAppPath: bundle, hostPid: process.pid, nodePath: process.execPath, ompPath: '/bin/sh', profile: 'default' }
+    const request = { sourceAppPath: bundle, hostPid: process.pid, ompPath: '/bin/sh', profile: 'default' }
     assert.equal(containingBundle(helper), realpathSync(bundle))
     // A foreign app at the destination: refused by the shared installer, with the packaged modules alone loaded.
     const destination = path.join(home, 'Applications/OMP Usage.app')

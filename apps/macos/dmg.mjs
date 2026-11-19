@@ -10,13 +10,14 @@ export const dmgNoteName = 'Install.txt'
 export const dmgNote = `OMP Usage
 
 1. Double-click "OMP Usage.app" in this window (or copy it anywhere first).
-2. The app opens a one-time setup. Review the detected Node.js and omp paths, then click "Install & Open".
+2. The app opens a one-time setup. Review the detected omp path, then click "Install & Open".
    Clicking Install installs OMP Usage into ~/Applications and registers a per-user login item (LaunchAgent).
    No administrator password is needed.
 
-Requirements: Node.js 22.18 or newer and the omp command-line tool, already installed on this Mac.
-OMP Usage never bundles or installs Node.js or omp. Setup never reads, edits or copies your omp credentials or plugins.
-Usage collection uses your existing omp installation and its normal authentication.
+Terminal alternative: a one-line installer does the same without this window; see the project README.
+
+Requirements: the omp command-line tool, already installed on this Mac. Node.js is bundled with the app and is not required.
+OMP Usage never installs omp. Setup never reads, edits or copies your omp credentials or plugins.
 
 Trust: this app is ad-hoc signed and its updates are authenticated with an Ed25519 key, but it is not
 Apple Developer ID signed or notarized, so macOS may warn the first time you open it. Use the standard

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { defaultConfig } from './config.mjs'
+import { collect } from './collect.mjs'
 
 const run = promisify(execFile)
 const bridge = fileURLToPath(new URL('./collect.mjs', import.meta.url))
@@ -127,5 +128,27 @@ test('symlinked runtime entry rejects invalid CLI arguments', async () => {
       if (!(error instanceof Error) || !('code' in error) || !('stdout' in error)) return false
       return error.code === 1 && error.stdout === ''
     })
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+test('the real collection bridge summarizes a file source even when OMP cannot run', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'panel-external-bridge-'))
+  try {
+    const file = path.join(dir, 'quota.json'), configPath = path.join(dir, 'config.json'), now = Date.now()
+    const config = { ...defaultConfig({ nodePath: process.execPath, ompPath: path.join(dir, 'missing-omp') }),
+      externalSources: [{ providerId: 'google-antigravity', path: file }] }
+    const snapshot = { version: 1, capturedAt: now, accounts: [40, 25].map((used, index) => ({
+      id: `cli-${index}`, provider: 'google-antigravity', label: `Antigravity ${index + 1}`, fetchedAt: now, notes: [],
+      limits: [{ id: 'quota', label: 'Quota', amount: { unit: 'percent', used, limit: 100, remaining: 100 - used },
+        usedFraction: used / 100, notes: [] }],
+    })), unavailable: [] }
+    await writeFile(file, JSON.stringify({ version: 1, providerId: 'google-antigravity', snapshot }))
+    await writeFile(configPath, JSON.stringify(config))
+    const result = await collect(['--config', configPath, '--refresh'])
+    assert.equal(result.source, 'partial')
+    assert.equal(result.summaries[0].label, 'Antigravity')
+    assert.equal(result.summaries[0].value, '40%')
+    assert.deepEqual(result.summaries[0].accountSummaries?.map(ring => [ring.accountId, ring.value]), [['cli-0', '40%'], ['cli-1', '25%']])
+    assert.equal(result.snapshot?.capturedAt, now)
+    assert.equal(result.providerSources?.[0].source, 'cache')
   } finally { await rm(dir, { recursive: true, force: true }) }
 })

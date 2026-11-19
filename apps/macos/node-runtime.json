@@ -1,0 +1,18 @@
+{
+  "version": "22.23.5",
+  "teamIdentifier": "HX7739G8FX",
+  "arches": {
+    "arm64": {
+      "url": "https://nodejs.org/dist/v22.23.5/node-v22.23.5-darwin-arm64.tar.gz",
+      "size": 50004868,
+      "sha256": "e7131995759b61a0170b646010d2ad35a5d37b4cb0d471f3e8317eac6f742f3d",
+      "binary": { "size": 113024160, "sha256": "ff9365ccf73e95b7ac69867418124973addde63043650c0db96bd6a722c53cd8" }
+    },
+    "x64": {
+      "url": "https://nodejs.org/dist/v22.23.5/node-v22.23.5-darwin-x64.tar.gz",
+      "size": 51197448,
+      "sha256": "c53383238206b9ae4db23c5d8a63645e2e753bec8ab51a49cc81939aa64e9422",
+      "binary": { "size": 115526528, "sha256": "25cc84c694014b6c97991915ce3916c331344d7f8f15f73544ae59c05b0778db" }
+    }
+  }
+}

@@ -1,9 +1,10 @@
-import { sign as cryptoSign } from 'node:crypto'
+import { createHash, sign as cryptoSign } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { dmgAppName } from './dmg.mjs'
+import { nodeArches, readNodePin } from './sparkle.mjs'
 
 // Test-only helpers shared by the release tests: a real universal ad-hoc-signed app, an in-process Ed25519 signer standing in for the
 // Keychain-backed one, and a temporary directory scope. Needs a macOS host with the Xcode command line tools.
@@ -24,7 +25,44 @@ export function signerFor(key) {
   }
 }
 
-/** Universal (arm64 + x86_64), ad-hoc deep-signed app. @param {string} directory @param {{version?: string, universal?: boolean}} [options] */
+const fakeNode = 'fake node\n'
+/**
+ * The committed pin with the binary identity of the fixtures' fake `node` file. Release flows that compare the bundled runtime with a pin get
+ * it as `nodePin`, so tiny fixtures stay hash-consistent without a real 113 MB Node binary.
+ * @type {import('./sparkle.mjs').NodePin}
+ */
+export const fixtureNodePin = (() => {
+  const real = readNodePin(), binary = { size: Buffer.byteLength(fakeNode), sha256: createHash('sha256').update(fakeNode).digest('hex') }
+  return { ...real, arches: Object.fromEntries(Object.entries(real.arches).map(([arch, entry]) => [arch, { ...entry, binary }])) }
+})()
+
+/**
+ * Tiny fake bundled-Node resources consistent with `pin` (default: `fixtureNodePin`): manifest identity (version, team, binary
+ * size/SHA-256 of the fake `node` file) over small stand-in archives holding exactly `node` (0755) and `LICENSE`. Never a real Node binary.
+ * @param {string} app @param {import('./sparkle.mjs').NodePin} [pin]
+ */
+export function writeFixtureNodeResources(app, pin = fixtureNodePin) {
+  const directory = path.join(app, 'Contents/Resources/node'), scratch = mkdtempSync(path.join(tmpdir(), 'omp-fixture-node-'))
+  try {
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(path.join(scratch, 'node'), fakeNode); chmodSync(path.join(scratch, 'node'), 0o755)
+    writeFileSync(path.join(scratch, 'LICENSE'), 'fake license\n')
+    /** @type {Record<string, object>} */
+    const arches = {}
+    for (const arch of nodeArches) {
+      const archive = path.join(directory, `node-${arch}.tar.xz`)
+      execFileSync('/usr/bin/tar', ['-cJf', archive, '-C', scratch, 'node', 'LICENSE'], { env: { ...process.env, COPYFILE_DISABLE: '1' } })
+      const bytes = readFileSync(archive)
+      arches[arch] = { archive: `node-${arch}.tar.xz`, archiveSize: bytes.length, archiveSHA256: createHash('sha256').update(bytes).digest('hex'), binarySize: pin.arches[arch].binary.size, binarySHA256: pin.arches[arch].binary.sha256 }
+    }
+    writeFileSync(path.join(directory, 'manifest.json'), `${JSON.stringify({ schema: 1, version: pin.version, teamIdentifier: pin.teamIdentifier, arches }, null, 2)}\n`)
+  } finally { rmSync(scratch, { recursive: true, force: true }) }
+}
+
+/**
+ * Universal (arm64 + x86_64), ad-hoc deep-signed app that always carries the fixture bundled Node resources.
+ * @param {string} directory @param {{version?: string, universal?: boolean}} [options]
+ */
 export function buildFixtureApp(directory, { version = '1.0.0', universal = true } = {}) {
   const root = path.join(directory, `app-${version}-${universal}`), app = path.join(root, dmgAppName)
   mkdirSync(path.join(app, 'Contents/MacOS'), { recursive: true })
@@ -34,6 +72,7 @@ export function buildFixtureApp(directory, { version = '1.0.0', universal = true
   execFileSync('/usr/bin/xcrun', ['clang', ...(universal ? ['-arch', 'arm64', '-arch', 'x86_64'] : ['-arch', process.arch === 'arm64' ? 'arm64' : 'x86_64']), '-o', path.join(app, 'Contents/MacOS/OMPUsagePanel'), source], { stdio: 'pipe' })
   rmSync(source)
   mkdirSync(path.join(app, 'Contents/Resources')); writeFileSync(path.join(app, 'Contents/Resources/data.txt'), 'resource')
+  writeFixtureNodeResources(app)
   execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'pipe' })
   return app
 }

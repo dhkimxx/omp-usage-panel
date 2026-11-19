@@ -4,11 +4,11 @@ private func draftConfig(
     providers: [String]? = nil, labels: ExactConfigMap = [:], metrics: ExactConfigMap = [:],
     nodePath: String = "/usr/bin/node", profile: String = "default", refreshSeconds: Double = 60,
     cacheMinutes: Double = 5, timeoutSeconds: Double = 25, warnPercent: Double = 70, criticalPercent: Double = 90,
-    showPace: Bool = true
+    showPace: Bool = true, externalSources: [ExternalSource] = []
 ) -> PanelConfig {
     PanelConfig(version: 1, nodePath: nodePath, ompPath: "/usr/local/bin/omp", profile: profile, refreshSeconds: refreshSeconds,
                 cacheMinutes: cacheMinutes, timeoutSeconds: timeoutSeconds, providers: providers, labels: labels,
-                metrics: metrics, warnPercent: warnPercent, criticalPercent: criticalPercent, showPace: showPace)
+                metrics: metrics, warnPercent: warnPercent, criticalPercent: criticalPercent, showPace: showPace, externalSources: externalSources)
 }
 
 /// Draft semantics at the consumer boundary: lossless round trip of committed values, explicit null vs [],
@@ -32,6 +32,20 @@ func runGeneralSettingsDraftTests() {
         draftConfig(warnPercent: 0, criticalPercent: 0),
     ]
     for sample in samples { precondition(committed(Draft(config: sample)) == sample, "unchanged draft must commit the original config") }
+    let externalConfig = draftConfig(externalSources: [ExternalSource(providerId: "google-antigravity", path: "/private/quota.json")])
+    var externalDraft = Draft(config: externalConfig)
+    precondition(committed(externalDraft) == externalConfig, "opening Settings preserves file opt-ins")
+    externalDraft.profile = "other-profile"
+    externalDraft.refreshSeconds = "30"
+    let externalCommit = try? externalDraft.commit()
+    precondition(externalCommit?.config.externalSources == externalConfig.externalSources, "Save preserves external sources while editing normal settings")
+    let restoredExternal = externalCommit.flatMap { try? PanelConfigStore.decode(PanelConfigStore.serialize($0.config)) }
+    precondition(restoredExternal?.externalSources == externalConfig.externalSources, "Settings save/load round trip cannot erase external sources")
+    externalDraft.selectMonitor(uuid: "37D8832A-2D66-02CA-B9F7-8F30A301B230")
+    externalDraft.placement.lockToNotch = true
+    let lockedExternalCommit = try? externalDraft.commit()
+    precondition(lockedExternalCommit?.config.externalSources == externalConfig.externalSources, "notch-lock Save preserves external source opt-ins")
+    precondition(lockedExternalCommit?.placement == externalDraft.placement, "external source Save preserves the staged monitor and notch lock")
 
     // Provider mode: automatic is nil, custom with no rows is [] (both expressible); rows survive mode switches.
     var draft = Draft(config: draftConfig(providers: nil))
@@ -142,15 +156,16 @@ func runGeneralSettingsDraftTests() {
     precondition(committed(thresholds) == nil && fields(thresholds) == [.warnPercent])
 
     // Runtime fields: raw values, absolute paths, nonblank profile; showPace pass-through.
-    var runtime = Draft(config: draftConfig())
-    runtime.setText("node", for: .nodePath)
+    var runtime = Draft(config: draftConfig(nodePath: "/legacy/path with space/node "))
+    runtime.setText("relative", for: .ompPath)
     runtime.setText("  ", for: .profile)
-    precondition(Set(fields(runtime)) == [.nodePath, .profile] && committed(runtime) == nil)
-    runtime.setText("/opt/with space/node ", for: .nodePath)
+    precondition(Set(fields(runtime)) == [.ompPath, .profile] && committed(runtime) == nil)
+    runtime.setText("/opt/with space/omp ", for: .ompPath)
     runtime.setText(" my profile", for: .profile)
     runtime.showPace = false
     let runtimeConfig = committed(runtime)
-    precondition(runtimeConfig?.nodePath == "/opt/with space/node " && runtimeConfig?.profile == " my profile" && runtimeConfig?.showPace == false, "paths/profile kept raw")
+    precondition(runtimeConfig?.ompPath == "/opt/with space/omp " && runtimeConfig?.profile == " my profile" && runtimeConfig?.showPace == false, "paths/profile kept raw")
+    precondition(runtimeConfig?.nodePath == "/legacy/path with space/node ", "the legacy Node path is carried through byte for byte")
 
     // Every problem is reported at once so the UI can mark them all; nothing is built on failure.
     var many = Draft(config: draftConfig())
@@ -349,8 +364,8 @@ private func runUnifiedCompactDraftTests() {
     precondition(bare.compact == nil && commit(bare)?.compactChanges.isEmpty == true && !bare.hasChanges(from: config, updatePolicy: .defaults))
 
     // Panel monitor: placement-only edits are unsaved changes, revert clears them, other edits keep the choice.
-    let builtIn = PanelDisplayChoice(uuid: "37D8832A-2D66-02CA-B9F7-8F30A301B230", name: "Built-in Retina Display", isPrimary: true)
-    let dell = PanelDisplayChoice(uuid: "63FD4F17-3FBA-46CD-AD01-70F294053371", name: "DELL U2417H", isPrimary: false)
+    let builtIn = PanelDisplayChoice(uuid: "37D8832A-2D66-02CA-B9F7-8F30A301B230", name: "Built-in Retina Display", isPrimary: true, hasNotch: true)
+    let dell = PanelDisplayChoice(uuid: "63FD4F17-3FBA-46CD-AD01-70F294053371", name: "DELL U2417H", isPrimary: false, hasNotch: false)
     var placed = Draft(config: config)
     precondition(!placed.hasChanges(from: config, updatePolicy: .defaults, placement: .defaults))
     placed.selectMonitor(uuid: dell.uuid)
@@ -366,6 +381,39 @@ private func runUnifiedCompactDraftTests() {
     placed.selectMonitor(uuid: builtIn.uuid)
     precondition(placed.hasChanges(from: config, updatePolicy: .defaults, placement: .defaults))
 
+    let placementBaseline = placed.placement
+    placed.placement.lockToNotch = true
+    precondition(placed.hasChanges(from: config, updatePolicy: .defaults, placement: placementBaseline))
+    precondition(commit(placed)?.placement.lockToNotch == true && commit(placed)?.config == config)
+    precondition(commit(placed)?.compactChanges.isEmpty == true, "lock-only save leaves other preferences alone")
+    let lockedDraft = placed
+    _ = placed.monitorOptions(choices: [dell])
+    precondition(placed == lockedDraft, "display refresh preserves the staged lock and monitor")
+    placed.setText("invalid", for: .refreshSeconds)
+    precondition(commit(placed) == nil && placed.placement == lockedDraft.placement, "failed validation retains the lock draft")
+    placed.setText(Draft.format(config.refreshSeconds), for: .refreshSeconds)
+    precondition(commit(placed)?.placement == lockedDraft.placement)
+    placed.placement.lockToNotch = false
+    precondition(!placed.hasChanges(from: config, updatePolicy: .defaults, placement: placementBaseline), "reverting lock removes dirty state")
+
+    // A legacy nil-UUID lock is preserved on open/save, but choosing a named monitor requires opting in again.
+    let primaryLock = PanelPlacementPreferences(lockToNotch: true)
+    var primaryLocked = Draft(config: config, placement: primaryLock)
+    precondition(!primaryLocked.canEditNotchLock && !primaryLocked.hasChanges(from: config, updatePolicy: .defaults, placement: primaryLock))
+    precondition(commit(primaryLocked)?.placement == primaryLock, "an unrelated Save preserves the inactive stored lock")
+    primaryLocked.selectMonitor(uuid: nil)
+    precondition(commit(primaryLocked)?.placement == primaryLock, "reselecting System primary does not silently reset its saved lock")
+    primaryLocked.selectMonitor(uuid: "  " + builtIn.uuid.lowercased() + "  ")
+    precondition(primaryLocked.canEditNotchLock && primaryLocked.hasChanges(from: config, updatePolicy: .defaults, placement: primaryLock))
+    precondition(commit(primaryLocked)?.placement == PanelPlacementPreferences(displayUUID: builtIn.uuid), "choosing a named monitor cannot activate an old primary lock")
+    primaryLocked.placement.lockToNotch = true
+    primaryLocked.selectMonitor(uuid: dell.uuid)
+    precondition(primaryLocked.canEditNotchLock && commit(primaryLocked)?.placement == PanelPlacementPreferences(displayUUID: dell.uuid, lockToNotch: true), "an explicit monitor change preserves the chosen lock even without a measured notch")
+    primaryLocked.selectMonitor(uuid: nil)
+    precondition(!primaryLocked.canEditNotchLock && commit(primaryLocked)?.placement == primaryLock)
+    primaryLocked.selectMonitor(uuid: builtIn.uuid)
+    precondition(commit(primaryLocked)?.placement == PanelPlacementPreferences(displayUUID: builtIn.uuid), "returning through System primary requires enabling lock again")
+
     // Options: default first, connected names, selection marked; catalog refresh never changes the staged choice.
     let connected = placed.monitorOptions(choices: [builtIn, dell])
     precondition(connected.map(\.title) == ["System primary (Default)", "Built-in Retina Display", "DELL U2417H"])
@@ -374,8 +422,8 @@ private func runUnifiedCompactDraftTests() {
     precondition(unplugged.count == 3 && unplugged[2].displayUUID == builtIn.uuid && unplugged[2].isSelected && !unplugged[2].isAvailable, "a disconnected selection stays visible")
     precondition(placed.placement.displayUUID == builtIn.uuid, "options never mutate the draft")
     precondition(placed.monitorButtonTitle(choices: [dell]) == "Disconnected monitor (unavailable)" && placed.monitorHint(choices: [dell]).contains("reconnects"))
-    let twinA = PanelDisplayChoice(uuid: "AAAAAAAA-0000-0000-0000-000000111111", name: "DELL U2417H", isPrimary: false)
-    let twinB = PanelDisplayChoice(uuid: "BBBBBBBB-0000-0000-0000-000000222222", name: "DELL U2417H", isPrimary: false)
+    let twinA = PanelDisplayChoice(uuid: "AAAAAAAA-0000-0000-0000-000000111111", name: "DELL U2417H", isPrimary: false, hasNotch: false)
+    let twinB = PanelDisplayChoice(uuid: "BBBBBBBB-0000-0000-0000-000000222222", name: "DELL U2417H", isPrimary: false, hasNotch: false)
     let twins = PlacementMonitorOption.options(selected: nil, choices: [twinA, twinB])
     precondition(twins[1].subtitle != twins[2].subtitle && twins[0].isSelected, "same-name monitors are distinguishable")
 }

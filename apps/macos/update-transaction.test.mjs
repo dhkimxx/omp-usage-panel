@@ -57,7 +57,6 @@ function fixture() {
   const binary = () => readFileSync(path.join(app, 'Contents/MacOS/OMPUsagePanel'), 'utf8')
   /** @param {string} file @param {string[]} args */
   function run(file, args) {
-    if (file === process.execPath && args[0] === '--version') return 'v22.18.0'
     if (file === '/bin/launchctl') {
       if (args[0] === 'print') {
         const jobLabel = args[1]?.split('/')[2] ?? ''
@@ -225,6 +224,19 @@ test('prepare leases the update to the live host, keeps a durable verified backu
     assert.throws(() => f.prepare(update.hash, '0.2.1'), { code: 'authorization-active' })
     assert.throws(() => f.prepare(update.hash, '0.2.0', OTHER_HOST), { code: 'authorization-active' })
     assert.equal(f.receipt().id, prepared.transactionId)
+  } finally { f.cleanup() }
+})
+test('prepare ignores the legacy Node path of the configuration: the receipt and watcher use the running managed Node', () => {
+  const f = fixture()
+  try {
+    f.installApp()
+    const stale = readFileSync(f.config, 'utf8').replace(JSON.stringify(process.execPath), JSON.stringify(path.join(f.home, 'gone/node')))
+    assert.notEqual(stale, readFileSync(f.config, 'utf8')); writeFileSync(f.config, stale)
+    const update = f.stageUpdate('0.2.0')
+    f.prepare(update.hash)
+    assert.equal(f.receipt().node, process.execPath)
+    assert.equal(f.spawned.length, 1); assert.equal(f.spawned[0]?.command, process.execPath)
+    assert.equal(readFileSync(f.config, 'utf8'), stale)
   } finally { f.cleanup() }
 })
 test('prepare refuses invalid requests and unmanaged, foreign-owned, modified or symlinked-area installs', () => {

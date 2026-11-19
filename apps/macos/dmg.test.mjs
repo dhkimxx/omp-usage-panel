@@ -87,6 +87,15 @@ test('layout validation refuses extra apps, an Applications link and extra files
   assert.throws(() => assertDmgLayout(directory))
 }))
 
+test('the install note says Node.js is bundled and mentions the one-line installer, and an image carrying any other note is refused', darwin, () => inTemp(directory => {
+  assert.match(dmgNote, /Node\.js is bundled/)
+  assert.match(dmgNote, /one-line installer/)
+  assert.match(dmgNote, /ad-hoc signed/)
+  const other = customDmg(directory, stage => { fixtureApp(stage); writeFileSync(path.join(stage, dmgNoteName), dmgNote.replace('Node.js is bundled', 'Node.js is required')) })
+  assert.throws(() => withDmgApp(other, () => 'never'), /not the expected install note/)
+  assert.equal(isAttached(other), false)
+}))
+
 test('an action failure propagates and a non-image never leaves anything attached', darwin, () => inTemp(directory => {
   const dmg = createDmg({ app: fixtureApp(directory), output: path.join(directory, 'propagate.dmg') })
   const failure = new Error('original action failure')

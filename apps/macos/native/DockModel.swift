@@ -92,6 +92,9 @@ enum DockGeometry {
         rect.minX.isFinite && rect.maxX.isFinite && rect.minY.isFinite && rect.maxY.isFinite
     }
 
+    /// Shared by placement locking and layout, so incomplete measurements never invent a camera cutout.
+    static func hasNotch(in screen: DockScreenMetrics) -> Bool { notch(in: screen) != nil }
+
     private static func notch(in screen: DockScreenMetrics) -> (center: CGFloat, width: CGFloat)? {
         let left = screen.auxiliaryTopLeft
         let right = screen.auxiliaryTopRight
@@ -452,7 +455,7 @@ enum DockPointerPolicy {
 enum CompactMark {
     private static let rules: [(needle: String, mark: String)] = [
         ("codex", "CX"), ("opencodego", "GO"), ("minimax", "MM"), ("commandcode", "CC"),
-        ("mistral", "MI"), ("anthropic", "AN"), ("claude", "AN")
+        ("mistral", "MI"), ("anthropic", "AN"), ("claude", "AN"), ("antigravity", "AG")
     ]
 
     private static func normalized(_ text: String) -> String {

@@ -56,6 +56,13 @@ func runProviderDetailModelTests() {
     precondition(provider.account.providerNotes == ["Original summary note"])
     // The synthetic fixture reports no plan; absence is data, not a placeholder.
     precondition(provider.account.plan == nil && provider.account.fetched != nil && provider.account.cautions.isEmpty)
+    var mixed = result([a, other], summaries: [summary("p"), summary("q")], source: "partial", error: "External source failed")
+    mixed.providerSources = [ProviderSource(provider: "p", source: "cache", capturedAt: 14000, error: nil),
+                             ProviderSource(provider: "q", source: "stale", capturedAt: 1000, error: "AUTH_REQUIRED")]
+    let healthyDetail = content(mixed, scope: .provider("p"))
+    let staleDetail = content(mixed, scope: .provider("q"))
+    precondition(healthyDetail.status == "Cached" && !healthyDetail.hasIssue && healthyDetail.account.cautions.isEmpty)
+    precondition(staleDetail.status.contains("Stale data") && staleDetail.hasIssue && staleDetail.account.cautions == ["AUTH_REQUIRED"])
     let planned = UsageAccount(id: "planned", provider: "p", label: "Planned", fetchedAt: .nan, plan: "  Pro  ",
                                notes: ["Same note", "Same note", "  "], limits: [])
     let plannedContent = content(result([planned], summaries: [summary("p")]), scope: .provider("p"))

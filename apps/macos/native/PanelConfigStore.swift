@@ -85,7 +85,7 @@ extension PanelConfigStore {
         guard case .object(let members) = root else { throw invalid("configuration", "must be a JSON object") }
 
         let names = ["version", "nodePath", "ompPath", "profile", "refreshSeconds", "cacheMinutes", "timeoutSeconds",
-                     "providers", "labels", "metrics", "warnPercent", "criticalPercent", "showPace"]
+                     "providers", "labels", "metrics", "warnPercent", "criticalPercent", "showPace", "externalSources"]
         if members.contains(where: { member in !names.contains { $0.isExactlyEqual(to: member.key) } }) {
             throw invalid("configuration", "must not contain unsupported keys")
         }
@@ -123,12 +123,25 @@ extension PanelConfigStore {
         default: throw invalid("providers", "must be null or an array of strings")
         }
         guard case .bool(let showPace) = try member("showPace") else { throw invalid("showPace", "must be a boolean") }
+        let externalSources: [ExternalSource]
+        if let entry = members.first(where: { $0.key.isExactlyEqual(to: "externalSources") }) {
+            guard case .array(let sources) = entry.value else { throw invalid("externalSources", "must be an array") }
+            externalSources = try sources.map { source in
+                guard case .object(let fields) = source, fields.count == 2,
+                      let provider = fields.first(where: { $0.key.isExactlyEqual(to: "providerId") }),
+                      let path = fields.first(where: { $0.key.isExactlyEqual(to: "path") }),
+                      case .string(let providerId) = provider.value, case .string(let filePath) = path.value else {
+                    throw invalid("externalSources", "must contain only providerId and path strings")
+                }
+                return ExternalSource(providerId: providerId, path: filePath)
+            }
+        } else { externalSources = [] }
         let config = PanelConfig(
             version: 1, nodePath: try string("nodePath"), ompPath: try string("ompPath"), profile: try string("profile"),
             refreshSeconds: try number("refreshSeconds"), cacheMinutes: try number("cacheMinutes"),
             timeoutSeconds: try number("timeoutSeconds"), providers: providers, labels: try map("labels"),
             metrics: try map("metrics"), warnPercent: try number("warnPercent"), criticalPercent: try number("criticalPercent"),
-            showPace: showPace)
+            showPace: showPace, externalSources: externalSources)
         try config.validate()
         return config
     }
@@ -333,7 +346,7 @@ extension PanelConfigStore {
     static func serialize(_ config: PanelConfig) throws -> Data {
         func text<T: Encodable>(_ value: T) throws -> String {
             let encoder = JSONEncoder()
-            encoder.outputFormatting = [.withoutEscapingSlashes]
+            encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
             return String(decoding: try encoder.encode(value), as: UTF8.self)
         }
         func array(_ values: [String]) throws -> String {
@@ -359,6 +372,7 @@ extension PanelConfigStore {
             ("warnPercent", try text(config.warnPercent)),
             ("criticalPercent", try text(config.criticalPercent)),
             ("showPace", config.showPace ? "true" : "false"),
+            ("externalSources", try text(config.externalSources)),
         ]
         let body = try entries.map { "  " + (try text($0.0)) + ": " + $0.1 }.joined(separator: ",\n")
         let data = Data(("{\n" + body + "\n}\n").utf8)

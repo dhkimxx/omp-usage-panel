@@ -5,8 +5,8 @@ import AppKit
 /// & Open hands the confirmed values to the bundled `setup-install.mjs`, which copies the app to ~/Applications,
 /// writes the configuration and registers the login item, then this process exits.
 ///
-/// Accessibility identifiers: setup.title, setup.notice, setup.disclosure, setup.config.status, setup.node.path,
-/// setup.node.choose, setup.node.status, setup.omp.path, setup.omp.choose, setup.omp.status, setup.detect,
+/// Accessibility identifiers: setup.title, setup.notice, setup.disclosure, setup.config.status, setup.omp.path,
+/// setup.omp.choose, setup.omp.status, setup.detect,
 /// setup.profile, setup.hint, setup.error, setup.progress, setup.quit, setup.install.
 final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     private static let contentWidth: CGFloat = 520
@@ -19,22 +19,17 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
     private var draft: SetupDraft
     private var gate = SetupQuitGate()
 
-    private var nodeTouched = false
     private var ompTouched = false
     private var discovering = false
     private var discoveryFinished = false
     private var discoveryGeneration = 0
-    private var probeGeneration = 0
     private var failureMessage: String?
     private var installTakingLong = false
 
-    private let nodeField = SettingsTextField(frame: .zero)
     private let ompField = SettingsTextField(frame: .zero)
     private let profileField = SettingsTextField(frame: .zero)
-    private let nodeChoose = SettingsButton(title: "Choose\u{2026}", style: .secondary, compact: true)
     private let ompChoose = SettingsButton(title: "Choose\u{2026}", style: .secondary, compact: true)
     private let detectButton = SettingsButton(title: "Detect Again", style: .quiet, compact: true)
-    private let nodeStatus = NSTextField(wrappingLabelWithString: "")
     private let ompStatus = NSTextField(wrappingLabelWithString: "")
     private let configStatus = NSTextField(wrappingLabelWithString: "")
     private let noticeLabel = NSTextField(wrappingLabelWithString: "")
@@ -53,7 +48,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
         let existing = SetupExistingConfig.read(path: SetupLaunch.defaultConfigPath(home: home))
         let discovery = SetupDiscoveryEnvironment(home: home, path: ProcessInfo.processInfo.environment["PATH"])
         // Suggestions only: nothing is written until the user presses Install & Open.
-        draft = SetupDraft(existing: existing, suggestedNode: "", suggestedOmp: SetupDiscovery.ompCandidates(discovery).first ?? "")
+        draft = SetupDraft(existing: existing, suggestedOmp: SetupDiscovery.ompCandidates(discovery).first ?? "")
         let window = SettingsWindow(contentRect: NSRect(x: 0, y: 0, width: Self.contentWidth + 64, height: 640),
                                     styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "OMP Usage Setup"
@@ -78,9 +73,6 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }
-
-    /// Cancels bounded probes. Never interrupts an install (quit is held until it ends).
-    func shutdown() { runner.shutdown() }
 
     /// Quit is deferred while the install is mutating and honoured as soon as it finishes.
     func applicationShouldTerminate() -> NSApplication.TerminateReply {
@@ -169,27 +161,23 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
         noticeLabel.setAccessibilityIdentifier("setup.notice")
         noticeLabel.isHidden = true
 
-        let disclosure = label("Clicking Install & Open means you agree to this:\n\u{2022} OMP Usage is copied to ~/Applications/OMP Usage.app.\n\u{2022} Its settings are saved in ~/Library/Application Support/omp-usage-panel.\n\u{2022} A login item is registered so it starts automatically every time you log in.\n\u{2022} Node.js and omp are used from the paths below and are never copied. This setup does not read or copy your omp sign-in or plugins; after setup, usage collection runs through the installed omp.\n\u{2022} This app is not notarized by Apple, so macOS may ask you to confirm opening it.", size: 12, color: SettingsPalette.secondary, width: Self.cardInnerWidth, identifier: "setup.disclosure")
+        let disclosure = label("Clicking Install & Open means you agree to this:\n\u{2022} OMP Usage is copied to ~/Applications/OMP Usage.app.\n\u{2022} Its settings are saved in ~/Library/Application Support/omp-usage-panel.\n\u{2022} A login item is registered so it starts automatically every time you log in.\n\u{2022} OMP Usage runs on its own bundled copy of Node.js, unpacked into ~/Library/Application Support/omp-usage-panel/runtime; you do not need to install Node.js.\n\u{2022} omp is used from the path below and is never copied. This setup does not read or copy your omp sign-in or plugins; after setup, usage collection runs through the installed omp.\n\u{2022} This app is not notarized by Apple, so macOS may ask you to confirm opening it.", size: 12, color: SettingsPalette.secondary, width: Self.cardInnerWidth, identifier: "setup.disclosure")
 
         style(configStatus, size: 12, color: SettingsPalette.secondary, identifier: "setup.config.status", width: Self.cardInnerWidth)
         configStatus.isHidden = true
 
-        configure(nodeField, placeholder: "/opt/homebrew/bin/node", identifier: "setup.node.path", label: "Node.js path")
         configure(ompField, placeholder: "~/.local/bin/omp (absolute path)", identifier: "setup.omp.path", label: "omp path")
         configure(profileField, placeholder: SetupDraft.defaultProfile, identifier: "setup.profile", label: "Profile")
-        style(nodeStatus, size: 11, color: SettingsPalette.muted, identifier: "setup.node.status", width: Self.cardInnerWidth)
         style(ompStatus, size: 11, color: SettingsPalette.muted, identifier: "setup.omp.status", width: Self.cardInnerWidth)
-        for (button, id, name) in [(nodeChoose, "setup.node.choose", "Choose Node.js"), (ompChoose, "setup.omp.choose", "Choose omp"), (detectButton, "setup.detect", "Detect Again")] {
+        for (button, id, name) in [(ompChoose, "setup.omp.choose", "Choose omp"), (detectButton, "setup.detect", "Detect Again")] {
             button.setAccessibilityIdentifier(id)
             button.setAccessibilityLabel(name)
         }
-        nodeChoose.target = self; nodeChoose.action = #selector(chooseNode)
         ompChoose.target = self; ompChoose.action = #selector(chooseOmp)
         detectButton.target = self; detectButton.action = #selector(detectClicked)
 
         let form = card([
             configStatus,
-            pathRow(title: "Node.js (22.18 or newer)", field: nodeField, choose: nodeChoose, status: nodeStatus),
             pathRow(title: "omp", field: ompField, choose: ompChoose, status: ompStatus),
             pathRow(title: "Profile", field: profileField, choose: nil, status: NSTextField(wrappingLabelWithString: "")),
         ])
@@ -238,11 +226,10 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
     // MARK: State
 
     private func loadFields() {
-        nodeField.stringValue = draft.nodePath
         ompField.stringValue = draft.ompPath
         profileField.stringValue = draft.profile
         let editable = !draft.isReadOnly && !draft.isRefused
-        for field in [nodeField, ompField, profileField] {
+        for field in [ompField, profileField] {
             field.isEditable = editable
             field.isSelectable = true
         }
@@ -261,7 +248,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
 
     private func beginInitialChecks() {
         switch draft.existing {
-        case .valid: probeCurrentNode(after: 0)
+        case .valid: discoveryFinished = true; render()
         case .none: runDiscovery(force: false)
         case .refused: discoveryFinished = true; render()
         }
@@ -270,20 +257,17 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
     private func render() {
         let busy = gate.isMutating
         let editable = !draft.isReadOnly && !draft.isRefused && !busy
-        for field in [nodeField, ompField, profileField] { field.isEnabled = !busy; field.isEditable = editable }
-        nodeChoose.isEnabled = editable; ompChoose.isEnabled = editable
+        for field in [ompField, profileField] { field.isEnabled = !busy; field.isEditable = editable }
+        ompChoose.isEnabled = editable
         detectButton.isEnabled = editable && !discovering
         detectButton.isHidden = draft.isReadOnly || draft.isRefused
-        for button in [nodeChoose, ompChoose] { button.isHidden = draft.isReadOnly || draft.isRefused }
+        ompChoose.isHidden = draft.isReadOnly || draft.isRefused
         quitButton.isEnabled = !busy
         if busy { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
 
-        nodeField.showsError = draft.nodeIssue() != nil && !draft.nodePath.isEmpty
         ompField.showsError = !draft.isReadOnly && draft.ompIssue() != nil && !draft.ompPath.isEmpty
         profileField.showsError = !draft.isReadOnly && draft.profileIsBlank
 
-        let (nodeText, nodeColor) = nodeStatusText()
-        nodeStatus.stringValue = nodeText; nodeStatus.textColor = nodeColor
         let (ompText, ompColor) = ompStatusText()
         ompStatus.stringValue = ompText; ompStatus.textColor = ompColor
 
@@ -293,22 +277,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
         hintLabel.isHidden = hintLabel.stringValue.isEmpty
         errorLabel.stringValue = failureMessage ?? ""
         errorLabel.isHidden = failureMessage == nil
-        for button in [installButton, quitButton, nodeChoose, ompChoose, detectButton] { button.needsDisplay = true }
-    }
-
-    private func nodeStatusText() -> (String, NSColor) {
-        if draft.isRefused { return ("", SettingsPalette.muted) }
-        if let issue = draft.nodeIssue() {
-            if draft.nodePath.isEmpty { return (discovering || !discoveryFinished ? "Looking for Node.js\u{2026}" : "Node.js 22.18 or newer was not found. Install it, then press Detect Again or choose it.", SettingsPalette.muted) }
-            return (issue.message(subject: "node"), SettingsPalette.error)
-        }
-        switch draft.currentNodeProbe {
-        case nil: return ("Checking Node.js\u{2026}", SettingsPalette.muted)
-        case .compatible(let version)?: return ("Node.js \(version.text) is ready.", NSColor.systemGreen)
-        case .tooOld(let version)?: return ("Node.js \(version.text) is too old. Version 22.18 or newer is required.", SettingsPalette.error)
-        case .notRunnable?: return ("Node.js could not be run from this path.", SettingsPalette.error)
-        case .unrecognized?: return ("This file did not report a Node.js version.", SettingsPalette.error)
-        }
+        for button in [installButton, quitButton, ompChoose, detectButton] { button.needsDisplay = true }
     }
 
     private func ompStatusText() -> (String, NSColor) {
@@ -321,57 +290,26 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
         return ("omp found.", NSColor.systemGreen)
     }
 
-    // MARK: Discovery and probing
+    // MARK: Discovery
 
     private func runDiscovery(force: Bool) {
         discoveryGeneration += 1
         let generation = discoveryGeneration
-        if force { nodeTouched = false; ompTouched = false }
+        if force { ompTouched = false }
         discovering = true
         failureMessage = nil
         render()
         let environment = SetupDiscoveryEnvironment(home: home, path: ProcessInfo.processInfo.environment["PATH"])
-        let runner = self.runner
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var probes: [(path: String, probe: SetupNodeProbe)] = []
-            for candidate in SetupDiscovery.nodeCandidates(environment).prefix(8) {
-                let probe = runner.probeNodeBlocking(path: candidate)
-                probes.append((candidate, probe))
-                if probe.isCompatible { break }
-            }
             let omp = SetupDiscovery.ompCandidates(environment).first
             DispatchQueue.main.async {
                 guard let self, generation == self.discoveryGeneration else { return }
                 self.discovering = false
                 self.discoveryFinished = true
-                let chosen = SetupDiscovery.preferredNode(probes) ?? probes.first?.path
-                if !self.nodeTouched, let chosen {
-                    self.draft.setNodePath(chosen)
-                    self.nodeField.stringValue = chosen
-                    if let probe = probes.first(where: { $0.path == chosen })?.probe { self.draft.record(nodeProbe: probe, for: chosen) }
-                }
                 if !self.ompTouched, let omp { self.draft.setOmpPath(omp); self.ompField.stringValue = omp }
                 self.render()
             }
         }
-    }
-
-    /// Re-measures the current Node path after a short debounce (immediately with 0). Results for a path that was
-    /// edited again in the meantime are discarded.
-    private func probeCurrentNode(after delay: TimeInterval) {
-        probeGeneration += 1
-        let generation = probeGeneration
-        let path = draft.nodePath
-        guard draft.nodeIssue() == nil else { render(); return }
-        let start = { [weak self] in
-            guard let self, generation == self.probeGeneration else { return }
-            self.runner.probeNode(path: path) { [weak self] probe in
-                guard let self, generation == self.probeGeneration else { return }
-                self.draft.record(nodeProbe: probe, for: path)
-                self.render()
-            }
-        }
-        if delay > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: start) } else { start() }
     }
 
     // MARK: Editing
@@ -379,16 +317,11 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
     func controlTextDidChange(_ notification: Notification) {
         guard let field = notification.object as? NSTextField, !draft.isReadOnly, !gate.isMutating else { return }
         failureMessage = nil
-        if field === nodeField { nodeTouched = true; draft.setNodePath(field.stringValue); probeCurrentNode(after: 0.5) }
-        else if field === ompField { ompTouched = true; draft.setOmpPath(field.stringValue) }
+        if field === ompField { ompTouched = true; draft.setOmpPath(field.stringValue) }
         else if field === profileField { draft.setProfile(field.stringValue) }
         render()
     }
 
-    @objc private func chooseNode() { choose(message: "Choose the Node.js executable") { [weak self] path in
-        guard let self else { return }
-        self.nodeTouched = true; self.draft.setNodePath(path); self.nodeField.stringValue = path; self.probeCurrentNode(after: 0)
-    } }
     @objc private func chooseOmp() { choose(message: "Choose the omp executable") { [weak self] path in
         guard let self else { return }
         self.ompTouched = true; self.draft.setOmpPath(path); self.ompField.stringValue = path; self.render()
@@ -456,11 +389,10 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, NSTextF
         if routeKeyToComposingEditor() { return }
         window?.endEditing(for: nil)
         guard !gate.isMutating, let request = draft.request(sourceAppPath: sourceAppPath, hostPid: Int(ProcessInfo.processInfo.processIdentifier)) else { render(); return }
-        probeGeneration += 1
         failureMessage = nil
         gate.beginMutation()
         render()
-        runner.run(command: .install, nodePath: draft.helperNodePath, ompPath: draft.ompPath, helperPath: helperPath, request: request, timeout: SetupRunner.installNoticeDelay, onStillRunning: { [weak self] in
+        runner.run(command: .install, ompPath: draft.ompPath, helperPath: helperPath, request: request, timeout: SetupRunner.installNoticeDelay, onStillRunning: { [weak self] in
             guard let self, self.gate.isMutating else { return }
             self.installTakingLong = true; self.render()
         }) { [weak self] result in

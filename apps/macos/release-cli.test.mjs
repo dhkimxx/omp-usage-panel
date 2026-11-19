@@ -11,7 +11,7 @@ import { inTemp } from './release-fixtures.mjs'
 // `gh` is a PATH stub that refuses authentication; no network, credentials, Keychain or Sparkle SDK are reachable.
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const modules = ['release.mjs', 'ci-release.mjs', 'build.mjs', 'dmg.mjs', 'sparkle.mjs', 'ownership.mjs', 'update-channel.json']
+const modules = ['release.mjs', 'ci-release.mjs', 'build.mjs', 'dmg.mjs', 'sparkle.mjs', 'ownership.mjs', 'update-channel.json', 'node-runtime.json']
 const authRefusal = 'stub-gh-authentication-refused-3c9d1f'
 const feedSentinel = '<!-- feed sentinel: must stay byte-identical -->\n'
 
@@ -29,6 +29,7 @@ function isolatedEnv(root, stubs) {
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_TERMINAL_PROMPT: '0',
     OMP_USAGE_SPARKLE_CACHE: path.join(root, 'sparkle-cache'),
+    OMP_USAGE_NODE_CACHE: path.join(root, 'node-cache'),
   }
 }
 
@@ -67,6 +68,7 @@ test('package --ci-run refuses on GitHub authentication through the real CLI wit
     assert.equal(existsSync(output), false)
     assert.equal(existsSync(path.dirname(output)), false)
     assert.equal(existsSync(env.OMP_USAGE_SPARKLE_CACHE), false)
+    assert.equal(existsSync(env.OMP_USAGE_NODE_CACHE), false)
     assert.equal(existsSync(path.join(checkout, 'build')), false)
     assert.equal(readFileSync(feed, 'utf8'), feedSentinel)
     assert.deepEqual(readFileSync(channel), channelBefore)

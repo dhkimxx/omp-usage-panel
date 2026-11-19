@@ -9,12 +9,12 @@ function nonempty(value) { return typeof value === 'string' && value.trim().leng
 function stringMap(value) { return object(value) && Object.entries(value).every(([key, entry]) => nonempty(key) && nonempty(entry)) }
 /** @param {{nodePath:string,ompPath:string,profile?:string}} options @returns {PanelConfig} */
 export function defaultConfig({ nodePath, ompPath, profile = 'default' }) {
-  return parseConfig({ version: 1, nodePath, ompPath, profile, refreshSeconds: 60, cacheMinutes: 5, timeoutSeconds: 25, providers: null, labels: {}, metrics: {}, warnPercent: 70, criticalPercent: 90, showPace: true })
+  return parseConfig({ version: 1, nodePath, ompPath, profile, refreshSeconds: 60, cacheMinutes: 5, timeoutSeconds: 25, providers: null, labels: {}, metrics: {}, warnPercent: 70, criticalPercent: 90, showPace: true, externalSources: [] })
 }
 /** @param {unknown} value @returns {PanelConfig} */
 export function parseConfig(value) {
   if (!object(value)) throw new Error('Invalid panel configuration')
-  const keys = ['version', 'nodePath', 'ompPath', 'profile', 'refreshSeconds', 'cacheMinutes', 'timeoutSeconds', 'providers', 'labels', 'metrics', 'warnPercent', 'criticalPercent', 'showPace']
+  const keys = ['version', 'nodePath', 'ompPath', 'profile', 'refreshSeconds', 'cacheMinutes', 'timeoutSeconds', 'providers', 'labels', 'metrics', 'warnPercent', 'criticalPercent', 'showPace', 'externalSources']
   if (Object.keys(value).some(key => !keys.includes(key)) || value.version !== 1 ||
       !nonempty(value.nodePath) || typeof value.nodePath !== 'string' || !path.isAbsolute(value.nodePath) ||
       !nonempty(value.ompPath) || typeof value.ompPath !== 'string' || !path.isAbsolute(value.ompPath) || !nonempty(value.profile) ||
@@ -27,6 +27,11 @@ export function parseConfig(value) {
       typeof value.criticalPercent !== 'number' || !Number.isFinite(value.criticalPercent) || value.criticalPercent < value.warnPercent ||
       typeof value.showPace !== 'boolean') throw new Error('Invalid panel configuration')
   if (!Number.isFinite(value.cacheMinutes * 60000) || !Number.isFinite(value.timeoutSeconds * 1000) || !Number.isFinite(value.refreshSeconds * 1000)) throw new Error('Invalid panel configuration')
+  const externalSources = value.externalSources === undefined ? [] : value.externalSources
+  if (!Array.isArray(externalSources) || !externalSources.every(source => object(source) &&
+      Object.keys(source).length === 2 && nonempty(source.providerId) &&
+      typeof source.path === 'string' && path.isAbsolute(source.path) && !source.path.includes('\0')) ||
+      new Set(externalSources.map(source => source.providerId)).size !== externalSources.length) throw new Error('Invalid panel configuration')
   // Every required field and its value has been validated above.
-  return /** @type {PanelConfig} */ (/** @type {unknown} */ (value))
+  return /** @type {PanelConfig} */ (/** @type {unknown} */ ({ ...value, externalSources }))
 }
