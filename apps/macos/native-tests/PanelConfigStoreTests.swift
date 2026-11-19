@@ -34,6 +34,20 @@ func runPanelConfigStoreTests() throws {
     let parsedBase = try decodeObject(base)
     precondition(parsedBase == makeConfig(), "all-defaults object decodes")
     precondition(parsedBase.providers == nil, "explicit null providers decode to automatic")
+    precondition(parsedBase.externalSources.isEmpty, "legacy config defaults to no external sources")
+    let sourceRows = [["providerId": "google-antigravity", "path": "/private/quota.json"]]
+    let withSources = try decodeObject(with("externalSources", sourceRows))
+    precondition(withSources.externalSources == [ExternalSource(providerId: "google-antigravity", path: "/private/quota.json")])
+    let sourceRoundTrip = try PanelConfigStore.decode(PanelConfigStore.serialize(withSources))
+    precondition(sourceRoundTrip == withSources, "external file opt-ins survive strict serialization")
+    let invalidSources: [Any] = [NSNull(), "x", [["providerId": "", "path": "/q"]],
+                                [["providerId": "p", "path": "relative"]], [["providerId": "p", "path": "/q\0"]],
+                                [["providerId": "p", "path": "/q", "command": "forbidden"]], sourceRows + sourceRows]
+    for invalid in invalidSources {
+        precondition(!accepts("externalSources", invalid), "external source schema is strict")
+    }
+    let exactSources = [["providerId": "\u{00E9}", "path": "/one"], ["providerId": "e\u{0301}", "path": "/two"]]
+    precondition(accepts("externalSources", exactSources), "provider source IDs use exact string identity")
 
     for key in base.keys {
         var missing = base
@@ -110,7 +124,7 @@ func runPanelConfigStoreTests() throws {
     precondition(trickyRoundTrip == tricky, "serializer/decoder round trip")
     let encodedNil = try PanelConfigStore.serialize(makeConfig(providers: nil))
     let encodedObject = try JSONSerialization.jsonObject(with: encodedNil) as? [String: Any]
-    precondition(encodedObject?.count == 13 && encodedObject?["providers"] is NSNull, "nil providers serialize as explicit null with all 13 keys")
+    precondition(encodedObject?.count == 14 && encodedObject?["providers"] is NSNull, "nil providers serialize as explicit null with all 14 keys")
 
     // MARK: Exact string identity (Node keeps canonically-equivalent strings distinct; Swift == does not)
     let precomposed = "\u{00E9}"
@@ -200,12 +214,12 @@ func runPanelConfigStoreTests() throws {
     // [] and null are distinct and both persist.
     try store.save(makeConfig(providers: []))
     var persisted = try object(path)
-    precondition((persisted?["providers"] as? [Any])?.isEmpty == true && persisted?.count == 13, "[] persists as an empty array")
+    precondition((persisted?["providers"] as? [Any])?.isEmpty == true && persisted?.count == 14, "[] persists as an empty array")
     let reloadedEmpty = try PanelConfigStore(configPath: path).config
     precondition(reloadedEmpty.providers == [])
     try store.save(makeConfig(providers: nil))
     persisted = try object(path)
-    precondition(persisted?["providers"] is NSNull && persisted?.count == 13, "nil persists as explicit null")
+    precondition(persisted?["providers"] is NSNull && persisted?.count == 14, "nil persists as explicit null")
     let reloadedNil = try PanelConfigStore(configPath: path).config
     precondition(reloadedNil.providers == nil)
 

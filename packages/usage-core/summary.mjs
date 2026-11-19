@@ -6,7 +6,7 @@
 
 const order = ['openai-codex', 'opencode-go', 'minimax-code-cn', 'commandcode', 'mistral']
 /** @type {Record<string,string>} */
-const aliases = { 'openai-codex': 'Codex', 'opencode-go': 'Go', 'minimax-code-cn': 'MiniMax CN', commandcode: 'Cmd', mistral: 'Mistral' }
+const aliases = { 'openai-codex': 'Codex', 'opencode-go': 'Go', 'minimax-code-cn': 'MiniMax CN', commandcode: 'Cmd', mistral: 'Mistral', 'google-antigravity': 'Antigravity' }
 /** @param {string} value */
 function clean(value) { return value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim() }
 /** @param {number} percent @param {{warnPercent?:number,criticalPercent?:number}} [thresholds] */
@@ -51,6 +51,7 @@ export function summarizeProviders(result, settings) {
     return { provider, label: clean(label), percent, value: percent === null ? '—' : formatPercent(percent, settings), severity,
       accountCount: matching.length, accountId: selected?.account.id ?? null, accountLabel: selected ? clean(selected.account.label) : null,
       metricId: selected?.limit.id ?? null, metricLabel: selected ? clean(selected.limit.label) : null, windowLabel: selected?.limit.window ? clean(selected.limit.window.label) : null,
-      notes: [...(metric !== undefined && !metricFound ? ['Configured metric not found'] : []), ...(unavailable.some(item => item.provider === provider) ? ['Some usage data is unavailable'] : [])] }
+      notes: [...(metric !== undefined && !metricFound ? ['Configured metric not found'] : []), ...(unavailable.some(item => item.provider === provider) ? ['Some usage data is unavailable'] : []),
+        ...(result.providerSources?.filter(item => item.provider === provider && (item.source === 'stale' || item.source === 'unavailable')).map(item => `${item.source === 'stale' ? 'Stale data' : 'Unavailable'}${item.error ? `: ${item.error}` : ''}`) ?? [])] }
   })
 }

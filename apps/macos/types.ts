@@ -1,3 +1,4 @@
+export interface ExternalSource { providerId: string; path: string }
 export interface PanelConfig {
   version: 1
   nodePath: string
@@ -12,4 +13,5 @@ export interface PanelConfig {
   warnPercent: number
   criticalPercent: number
   showPace: boolean
+  externalSources: ExternalSource[]
 }

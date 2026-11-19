@@ -45,6 +45,8 @@ final class Collector {
         }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: node)
+        // The bridge rereads disk, but native Settings retain the committed config. Manual edits require
+        // quitting before editing and relaunching afterward; saving an old Settings draft would overwrite them.
         task.arguments = [runtime, "--config", configPath] + (force ? ["--refresh"] : [])
         // The PATH is built per launch because the managed Node's directory is only known once it is resolved.
         let pathNode = ChildEnvironment.pathNode(configured: config.nodePath, managed: node, directoryExists: ChildEnvironment.directoryExists)

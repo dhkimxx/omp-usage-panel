@@ -227,8 +227,14 @@ enum ProviderDetailModel {
             if let report = selected?.unavailable { return summary.provider == report.provider }
             return true
         }.flatMap(\.notes)
+        let selectedProvider: String?
+        switch scope {
+        case .provider(let provider): selectedProvider = provider
+        case .allAccounts: selectedProvider = selected?.account?.provider ?? selected?.unavailable?.provider
+        }
+        let providerSource = selectedProvider.flatMap { result?.source(for: $0) }
         var issues: [String] = []
-        for issue in [transportError, result?.error].compactMap({ $0 }) where !issue.isEmpty && !issues.contains(issue) {
+        for issue in [transportError, providerSource != nil ? providerSource?.error : result?.error].compactMap({ $0 }) where !issue.isEmpty && !issues.contains(issue) {
             issues.append(issue)
         }
         info.cautions.append(contentsOf: issues)
@@ -243,13 +249,14 @@ enum ProviderDetailModel {
         info.cautions = distinct(info.cautions)
         info.accountNotes = distinct(info.accountNotes)
         info.providerNotes = distinct(summaryNotes)
-        let source = result?.source ?? "unavailable"
+        let source = providerSource?.source ?? result?.source ?? "unavailable"
         let freshness: String
-        switch result?.source {
+        switch providerSource?.source ?? result?.source {
         case "live": freshness = issues.isEmpty ? "Live" : "Last successful snapshot"
         case "cache": freshness = "Cached"
         case "stale": freshness = "Stale data"
         case "unavailable": freshness = "Unavailable"
+        case "partial": freshness = "Partial data"
         case .some(let name): freshness = "Source: \(name)"
         case .none: freshness = "Waiting for usage data"
         }

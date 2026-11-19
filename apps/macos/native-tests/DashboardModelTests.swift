@@ -69,6 +69,17 @@ func runDashboardModelTests() {
                                                              error: "No credentials", summaries: summaries),
                                           issue: "", collecting: false, showPace: true)
     precondition(unavailable.cards.count == summaries.count && unavailable.cards.allSatisfy { $0.hasIssue })
+    let mixedSources = [
+        ProviderSource(provider: "mistral", source: "live", capturedAt: 14000, error: nil),
+        ProviderSource(provider: "google-antigravity", source: "stale", capturedAt: 1000, error: "AUTH_REQUIRED"),
+    ]
+    let mixed = PanelResult(snapshot: snapshot, source: "partial", error: "External usage data is stale or unavailable",
+                            summaries: [summary("mistral"), summary("google-antigravity")], providerSources: mixedSources)
+    let mixedContent = DashboardModel.make(result: mixed, issue: "", collecting: false, showPace: true)
+    precondition(mixedContent.status.contains("Partial data"))
+    precondition(!mixedContent.cards[0].hasIssue && mixedContent.cards[1].hasIssue, "a stale external source must not taint a healthy OMP card")
+    precondition(mixedContent.cards[1].tooltip.contains("Stale data") && mixedContent.cards[1].tooltip.contains("AUTH_REQUIRED"))
+    precondition(CompactMark.monogram(provider: "google-antigravity", label: "custom label") == "AG")
 
     func card(_ period: UsageWindow?) -> DashboardCard {
         let source = UsageSnapshot(version: 1, capturedAt: 14000,
